@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "sessionId": "augur-scene-001-the-tavern-1776224934195",
+  "savedAt": "2026-04-14T20:45:00.000Z",
+  "leafId": "e11",
+  "entries": [
+    {
+      "id": "e1",
+      "parentId": null,
+      "card": { "id": "__scene-open", "mechanic": "act.speak" },
+      "label": "scene-open",
+      "timestamp": 1776224934195,
+      "messages": [
+        { "role": "user", "content": "Open the scene. Render the opening beat described in the scene hooks.", "timestamp": 1776224934200 },
+        { "role": "assistant", "content": [{"type":"text","text":"The threshold held him before I could. The lantern swung without wind and the floorboards kept a slow count I had never set. He did not look at me. The fire was low. The rain made a quiet argument with the eaves, and the inn kept its silence like a held coin."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":337,"output":1370,"cacheRead":0,"cacheWrite":0,"totalTokens":1707,"cost":{"total":0.0043}}, "stopReason":"stop", "timestamp": 1776224935000 }
+      ],
+      "usage": { "input": 337, "output": 1370, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 1707, "cost": { "total": 0.0043 } }
+    },
+    {
+      "id": "e2",
+      "parentId": "e1",
+      "card": { "id": "keep-the-drum", "mechanic": "momentum.hold" },
+      "label": "drum-held",
+      "timestamp": 1776224940000,
+      "messages": [
+        { "role": "user", "content": "The Claw plays [keep-the-drum]. I settle. I keep the drum. Render the room settling into rhythm: one short paragraph, interior only. No dialogue. Keep under 40 words.", "timestamp": 1776224940100 },
+        { "role": "assistant", "content": [{"type":"text","text":"I set a hand on the bar and did not move. The wood took my warmth slowly, the way old things do. My breath lengthened. The room's small sounds fell in with mine, and the night kept its own count."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":512,"output":410,"cacheRead":280,"cacheWrite":0,"totalTokens":922,"cost":{"total":0.0018}}, "timestamp": 1776224941000 }
+      ],
+      "usage": { "input": 512, "output": 410, "cacheRead": 280, "cacheWrite": 0, "totalTokens": 922, "cost": { "total": 0.0018 } }
+    },
+    {
+      "id": "e3",
+      "parentId": "e2",
+      "card": { "id": "ask-who-they-are", "mechanic": "act.speak" },
+      "label": "first-asking",
+      "timestamp": 1776224945000,
+      "messages": [
+        { "role": "user", "content": "The Claw plays [ask-who-they-are]. I ask the Stranger who he is, speaking gently, without pressing.", "timestamp": 1776224945100 },
+        { "role": "assistant", "content": [{"type":"text","text":"He did not turn. 'A man who has been here before you,' he said, and his voice was the kind that knew every answer would cost him. The fire ticked. The lantern sighed on its chain. The room listened and gave nothing back."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":820,"output":460,"cacheRead":640,"cacheWrite":0,"totalTokens":1280,"cost":{"total":0.0021}}, "timestamp": 1776224946000 }
+      ],
+      "usage": { "input": 820, "output": 460, "cacheRead": 640, "cacheWrite": 0, "totalTokens": 1280, "cost": { "total": 0.0021 } }
+    },
+    {
+      "id": "e4",
+      "parentId": "e3",
+      "card": { "id": "trust-your-gut", "mechanic": "mind.fast" },
+      "label": "instinct",
+      "timestamp": 1776224948000,
+      "messages": [
+        { "role": "user", "content": "What does my body already know about him?", "timestamp": 1776224948050 },
+        { "role": "assistant", "content": [{"type":"text","text":"The room did not trust him. My shoulders already knew."}], "provider": "cloudflare", "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "usage": {"input":180,"output":32,"cacheRead":0,"cacheWrite":0,"totalTokens":212,"cost":{"total":0.0002}}, "timestamp": 1776224948900 }
+      ],
+      "usage": { "input": 180, "output": 32, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 212, "cost": { "total": 0.0002 } }
+    },
+    {
+      "id": "e5",
+      "parentId": "e2",
+      "card": { "id": "light-a-candle", "mechanic": "time.branch" },
+      "label": "candle-lit-asking",
+      "timestamp": 1776224955000,
+      "messages": [
+        { "role": "user", "content": "[light-a-candle · time.branch] I ask the Stranger who he is, speaking gently, without pressing.", "timestamp": 1776224955100 },
+        { "role": "assistant", "content": [{"type":"text","text":"He almost turned this time. The candle made his face kinder by half. 'A man,' he said, softly, 'who has been waiting.' The words cost him less in this light, though they still cost him."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":900,"output":420,"cacheRead":720,"cacheWrite":0,"totalTokens":1320,"cost":{"total":0.0020}}, "timestamp": 1776224956000 }
+      ],
+      "usage": { "input": 900, "output": 420, "cacheRead": 720, "cacheWrite": 0, "totalTokens": 1320, "cost": { "total": 0.0020 } }
+    },
+    {
+      "id": "e6",
+      "parentId": "e5",
+      "card": { "id": "name-him", "mechanic": "mind.know" },
+      "label": "named-true",
+      "timestamp": 1776224962000,
+      "messages": [
+        { "role": "user", "content": "The Claw plays [name-him]. \"Adrik,\" I said. Just the once.", "timestamp": 1776224962100 },
+        { "role": "assistant", "content": [{"type":"text","text":"He turned. Only his head, only once — a slow, astonished turning, as if a door he had bolted from the inside had opened of its own accord. 'Yes,' he said. And then nothing. The room kept the silence like an offering."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":1100,"output":530,"cacheRead":920,"cacheWrite":0,"totalTokens":1630,"cost":{"total":0.0024}}, "timestamp": 1776224963000 }
+      ],
+      "usage": { "input": 1100, "output": 530, "cacheRead": 920, "cacheWrite": 0, "totalTokens": 1630, "cost": { "total": 0.0024 } }
+    },
+    {
+      "id": "e7",
+      "parentId": "e6",
+      "card": { "id": "remember-his-eyes", "mechanic": "memory.recall" },
+      "label": "recalled",
+      "timestamp": 1776224968000,
+      "messages": [
+        { "role": "user", "content": "The Claw plays [remember-his-eyes]. I hold again in my mind the moment the latch turned in his face.", "timestamp": 1776224968100 },
+        { "role": "assistant", "content": [{"type":"text","text":"I held the moment again. The way his head had turned, slow as a key. Nothing new came; the old thing only sat deeper in me, cooler, surer."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":1260,"output":290,"cacheRead":1080,"cacheWrite":0,"totalTokens":1550,"cost":{"total":0.0019}}, "timestamp": 1776224969000 }
+      ],
+      "usage": { "input": 1260, "output": 290, "cacheRead": 1080, "cacheWrite": 0, "totalTokens": 1550, "cost": { "total": 0.0019 } }
+    },
+    {
+      "id": "e8",
+      "parentId": "e7",
+      "card": { "id": "vow-of-silence", "mechanic": "ward.vow" },
+      "label": "vow-spoken",
+      "timestamp": 1776224975000,
+      "messages": [
+        { "role": "user", "content": "The Claw plays [vow-of-silence]. I make the vow without speaking it. I will not say his name again in this room. Render the act of vowing: internal, silent, weighted. No dialogue from the Claw. Keep under 50 words.", "timestamp": 1776224975100 },
+        { "role": "assistant", "content": [{"type":"text","text":"I closed the name inside me like a letter I would never post. The vow made a small, cold weight behind my teeth. The room noticed, the way rooms do, and took the weight into its rafters and kept it there."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":1400,"output":360,"cacheRead":1220,"cacheWrite":0,"totalTokens":1760,"cost":{"total":0.0022}}, "timestamp": 1776224976000 }
+      ],
+      "usage": { "input": 1400, "output": 360, "cacheRead": 1220, "cacheWrite": 0, "totalTokens": 1760, "cost": { "total": 0.0022 } }
+    },
+    {
+      "id": "e9",
+      "parentId": "e8",
+      "card": { "id": "bolt-the-door", "mechanic": "place.bind" },
+      "label": "door-bolted",
+      "timestamp": 1776224981000,
+      "messages": [
+        { "role": "user", "content": "The Claw plays [bolt-the-door]. I drop the iron bolt. The drum of the door sounds once.", "timestamp": 1776224981100 },
+        { "role": "assistant", "content": [{"type":"text","text":"The bolt went home with a sound like a struck drum. The room swallowed the echo and held it. Nothing would enter now. Nothing would leave. He did not look up, but his hands on the table went still."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":1560,"output":410,"cacheRead":1380,"cacheWrite":0,"totalTokens":1970,"cost":{"total":0.0025}}, "timestamp": 1776224982000 }
+      ],
+      "usage": { "input": 1560, "output": 410, "cacheRead": 1380, "cacheWrite": 0, "totalTokens": 1970, "cost": { "total": 0.0025 } }
+    },
+    {
+      "id": "e10",
+      "parentId": "e9",
+      "card": { "id": "ask-about-the-rain", "mechanic": "act.speak" },
+      "label": "small-talk",
+      "timestamp": 1776224988000,
+      "messages": [
+        { "role": "user", "content": "The Claw plays [ask-about-the-rain]. I ask after the rain, as though it were a courtesy. I do not mention the door.", "timestamp": 1776224988100 },
+        { "role": "assistant", "content": [{"type":"text","text":"'It has been at the roof since vespers,' he said, and his eyes went, almost, to the bolted door, and away. 'It will be at it until morning.' The lantern stilled. The room was a room with a bolt in it now, and he knew, and did not say."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":1740,"output":470,"cacheRead":1540,"cacheWrite":0,"totalTokens":2210,"cost":{"total":0.0028}}, "timestamp": 1776224989000 }
+      ],
+      "usage": { "input": 1740, "output": 470, "cacheRead": 1540, "cacheWrite": 0, "totalTokens": 2210, "cost": { "total": 0.0028 } }
+    },
+    {
+      "id": "e11",
+      "parentId": "e10",
+      "card": { "id": "scry-the-lantern", "mechanic": "sight.scry" },
+      "label": "scried",
+      "timestamp": 1776224995000,
+      "messages": [
+        { "role": "user", "content": [
+          {"type":"text","text":"The Claw plays [scry-the-lantern]. I look at the room. I let it be a sign. Read what you see and speak it back."},
+          {"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAACQd1PeAAAAVUlEQVR4nO3QMRHAMAwEQTs9igMoIwyCGr6Af2V3Mxp91N53XvKczTqdcXICFIBAgAIQCFAAAgEKQCBAAQgEKAAB/4GnZznndMbpCVAAAgEKQCBAAXzcBR7QA9R+B5oUAAAAAElFTkSuQmCC"}
+        ], "timestamp": 1776224995100 },
+        { "role": "assistant", "content": [{"type":"text","text":"A dark field. A warm shape low and left — the candle, still lit. A paler square, high and centered: the door, closed against its own outline. I read it plainly: the room holds itself shut; the flame is the only permission left in it."}], "provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.5", "usage": {"input":2040,"output":510,"cacheRead":1700,"cacheWrite":0,"totalTokens":2550,"cost":{"total":0.0038}}, "timestamp": 1776224996500 }
+      ],
+      "usage": { "input": 2040, "output": 510, "cacheRead": 1700, "cacheWrite": 0, "totalTokens": 2550, "cost": { "total": 0.0038 } }
+    }
+  ],
+  "facts": {
+    "door": "bolted from the inside; no one may enter or leave"
+  },
+  "vows": [
+    "The Claw has vowed never again to speak the Stranger's true name ('Adrik') aloud in this scene. The narration MUST NOT have the Claw say that name, nor quote it in any speech attributed to the Claw."
+  ]
+}

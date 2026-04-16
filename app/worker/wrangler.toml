@@ -1,0 +1,39 @@
+# Augur — Worker + Static Assets.
+
+name = "augur"
+main = "src/index.ts"
+compatibility_date = "2026-04-14"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "../client/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[ai]
+binding = "AI"
+
+[[durable_objects.bindings]]
+name = "HEARTH"
+class_name = "Hearth"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hearth"]
+
+[[migrations]]
+tag = "v2-wipe-2026-04-15"
+deleted_classes = ["Hearth"]
+
+[[migrations]]
+tag = "v3-recreate-2026-04-15"
+new_sqlite_classes = ["Hearth"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "augur-db"
+database_id = "d936ab33-392e-47b4-b82e-bb7656cdb82e"
+
+# Local dev vars live in .dev.vars. For deploys:
+#   wrangler secret put CLOUDFLARE_ACCOUNT_ID
+#   wrangler secret put CLOUDFLARE_API_KEY
