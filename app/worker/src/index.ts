@@ -20,7 +20,6 @@ import { handlePush, handlePull, handleRelease } from "./sync.ts";
 export { Hearth };
 
 interface Env extends HearthEnv {
-  ASSETS: Fetcher;
   AI: Ai;
   DB: D1Database;
 }
@@ -1906,7 +1905,7 @@ export default {
       return stub.fetch(request);
     }
 
-    // Everything else → static client assets.
-    return env.ASSETS.fetch(request);
+    // This worker is API-only — the client is served by Cloudflare Pages.
+    return new Response("Not found", { status: 404, headers: CORS_HEADERS });
   },
 };

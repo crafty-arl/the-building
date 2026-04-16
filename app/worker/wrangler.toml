@@ -1,14 +1,9 @@
-# Augur — Worker + Static Assets.
+# The Building — Worker (API only; static client is on Cloudflare Pages).
 
 name = "augur"
 main = "src/index.ts"
 compatibility_date = "2026-04-14"
 compatibility_flags = ["nodejs_compat"]
-
-[assets]
-directory = "../client/dist"
-binding = "ASSETS"
-not_found_handling = "single-page-application"
 
 [ai]
 binding = "AI"
