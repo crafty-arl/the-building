@@ -82,7 +82,7 @@ export async function handleRegisterOptions(
     attestationType: "none",
     authenticatorSelection: {
       residentKey: "required",
-      userVerification: "preferred",
+      userVerification: "required",
     },
   });
 
@@ -171,7 +171,7 @@ export async function handleLoginOptions(
   const rp = rpConfig(request);
   const options = await generateAuthenticationOptions({
     rpID: rp.rpID,
-    userVerification: "preferred",
+    userVerification: "required",
   });
 
   const challengeToken = genToken();
