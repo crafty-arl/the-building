@@ -4,9 +4,8 @@ import {
   type Character,
   type EmoteKind,
   type SavedRoom,
-  MAP_COLS,
-  MAP_ROWS,
   TILE_PX,
+  stepCamera,
   formatSimTime,
   initialState,
   tickPlans,
@@ -29,6 +28,8 @@ import {
   resetCodaFlag,
   listRooms,
   loadRoomById,
+  deleteRoom,
+  isArchivedRoom,
   newRoomId,
   consumeSharedRoomFromUrl,
   hasSharedRoomInUrl,
@@ -69,16 +70,6 @@ import {
   composeIngredientPrompt,
   type IngredientCategory,
 } from "./ingredients";
-
-// Default canvas dimensions — overridden per-scene at render time.
-const CANVAS_W = MAP_COLS * TILE_PX;
-const CANVAS_H = MAP_ROWS * TILE_PX;
-
-function sceneDims(scene: { map: string[] }): { w: number; h: number; pxW: number; pxH: number } {
-  const cols = scene.map[0]?.length ?? MAP_COLS;
-  const rows = scene.map.length || MAP_ROWS;
-  return { w: cols, h: rows, pxW: cols * TILE_PX, pxH: rows * TILE_PX };
-}
 
 const PROMPT_TEMPLATES = [
   { label: "cabin", prompt: "a woodcutter's cabin at the edge of the forest, hearth still warm" },
@@ -281,6 +272,14 @@ export function RPG() {
   const lastRef = useRef(performance.now());
   const lastSaveRef = useRef(performance.now());
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Side-view camera: world-x offset in pixels and a zoom factor. Owned by
+  // the render loop (not GameState) — camera is a view concern.
+  const camRef = useRef<{ worldX: number; zoom: number }>({ worldX: 0, zoom: 1 });
+  // Canvas CSS size in logical pixels, updated by ResizeObserver.
+  const canvasSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+  // Most recent character that moved or spoke — used to pick the camera's
+  // follow target so the camera prefers whoever is "active" right now.
+  const lastActiveRef = useRef<string | null>(null);
   const pausedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -312,8 +311,36 @@ export function RPG() {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  // Canvas draw loop. Re-binds when we leave setup so we can attach to
-  // the canvas that mounts only after a seed is chosen.
+  // Resize the canvas to fill its frame. Runs once on mount and whenever
+  // the frame's size changes (window resize, mobile orientation, safe-area
+  // insets appearing/disappearing). We draw in CSS pixels and upscale the
+  // backing store by devicePixelRatio for sharpness on retina displays.
+  useEffect(() => {
+    if (state.phase !== "playing") return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const frame = canvas.parentElement;
+    if (!frame) return;
+    const apply = () => {
+      const rect = frame.getBoundingClientRect();
+      const cssW = Math.max(1, Math.floor(rect.width));
+      const cssH = Math.max(1, Math.floor(rect.height));
+      const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      canvas.style.width = `${cssW}px`;
+      canvas.style.height = `${cssH}px`;
+      canvas.width = Math.floor(cssW * dpr);
+      canvas.height = Math.floor(cssH * dpr);
+      canvasSizeRef.current = { w: cssW, h: cssH };
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(frame);
+    return () => ro.disconnect();
+  }, [state.phase]);
+
+  // Canvas draw loop. Applies a camera transform so world draws happen in
+  // world coordinates; screen-space overlays (dialog, vignette, time-of-day)
+  // draw after the transform is reset.
   useEffect(() => {
     if (state.phase !== "playing") return;
     const canvas = canvasRef.current;
@@ -323,20 +350,65 @@ export function RPG() {
     let raf = 0;
     const draw = (now: number) => {
       const s = stateRef.current;
+      const { w: cssW, h: cssH } = canvasSizeRef.current;
+      if (cssW === 0 || cssH === 0) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
+      const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      // World size in CSS pixels (before camera zoom).
+      const cols = s.scene.map[0]?.length ?? 0;
+      const rows = s.scene.map.length;
+      const worldW = cols * TILE_PX;
+      const worldH = rows * TILE_PX;
+
+      // Pick an active follow target. Preference: whoever has pending
+      // speech now, else the last-moving character, else the first.
+      const speaker = s.characters.find((c) => c.speech && !c.dead);
+      const mover = s.characters.find((c) => c.moving && !c.dead);
+      const active = speaker ?? mover ?? s.characters.find((c) => !c.dead) ?? s.characters[0];
+      if (active) lastActiveRef.current = active.id;
+      const follow =
+        s.characters.find((c) => c.id === lastActiveRef.current) ?? active ?? null;
+
+      // Fit-to-height zoom: if the room is shorter than the viewport,
+      // stretch world pixels vertically so the scene fills the canvas.
+      // Otherwise use the natural 1× zoom and let the camera scroll.
+      const fitZoom = worldH > 0 ? Math.max(1, cssH / worldH) : 1;
+      camRef.current.zoom = fitZoom;
+      const zoom = camRef.current.zoom;
+
+      // Target x (world px) is the follow character's center.
+      const targetX = follow ? (follow.pos.x + 0.5) * TILE_PX : worldW / 2;
+      camRef.current.worldX = stepCamera(
+        camRef.current,
+        targetX,
+        cssW,
+        worldW,
+        zoom,
+      ).worldX;
+
+      // Reset to identity, clear, then apply camera (dpr × zoom, -camX).
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, -camRef.current.worldX * dpr * zoom, 0);
+
       drawScene(ctx, s.scene, now);
       drawFlagOverlays(ctx, s.scene, s.flags, now);
       drawRoomItems(ctx, s.scene, s.roomItems, now);
       for (const c of s.characters) drawCharacter(ctx, c, s.scene, now, s.characters);
-      drawTimeOfDay(ctx, simHour(now, s.simStartedAt));
-      drawVignette(ctx);
-      drawDialog(ctx, s.pending, now);
+
+      // Screen-space overlays — reset to identity (dpr only).
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawTimeOfDay(ctx, simHour(now, s.simStartedAt), cssW, cssH);
+      drawVignette(ctx, cssW, cssH);
+      drawDialog(ctx, s.pending, now, cssW, cssH);
+
       raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [state.phase, state.scene.map.length, state.scene.map[0]?.length]);
-
-  // Single-line scene: no scrolling.
+  }, [state.phase]);
 
   const [narratorThinking, setNarratorThinking] = useState(false);
   const [llmFallbackReason, setLlmFallbackReason] = useState<string | null>(null);
@@ -418,6 +490,7 @@ export function RPG() {
       applyScene(stateRef.current, scene); resetCodaFlag();
       const live = stateRef.current;
       live.roomId = newRoomId();
+      live.roomPrompt = prompt;
       live.buildingId = bld.id;
       live.floorIndex = bld.floors.length;
       live.inheritedMemory = buildInheritedMemory(bld);
@@ -628,11 +701,30 @@ export function RPG() {
         setLockedAlert({ roomId: id, lockedAt: lock.lockedAt });
         return;
       }
+      const saved = listRooms().find((r) => r.id === id);
+      if (saved && isArchivedRoom(saved)) {
+        flashToast("archived floor — regenerate or delete");
+        return;
+      }
       const loaded = loadRoomById(id, performance.now());
       if (!loaded) return;
       stateRef.current = loaded;
       resetCodaFlag();
       setState({ ...loaded });
+    };
+
+    const onRegenerateRoom = (saved: SavedRoom) => {
+      const p = (saved.prompt ?? "").trim();
+      if (!p) {
+        flashToast("no prompt saved for this floor");
+        return;
+      }
+      // Drop the archived entry first so regeneration overwrites cleanly.
+      deleteRoom(saved.id);
+      setLibraryTick((t) => t + 1);
+      setRoomPrompt(p);
+      setShowNewRoomForm(true);
+      flashToast("regenerating — edit prompt if you like");
     };
 
     const showForm = showNewRoomForm || rooms.length === 0;
@@ -932,27 +1024,56 @@ export function RPG() {
               <span className="rp-roof-btn">+</span>
             </button>
 
-            {activeRoom && (
-              <div className="rp-floor is-active" role="listitem">
-                <div className="rp-floor-num">{building.floors.length + 1}</div>
-                <div className="rp-floor-body">
-                  <MiniRoomCanvas room={activeRoom} />
-                  <div className="rp-floor-info">
-                    <div className="rp-floor-name">{activeRoom.snapshot.scene.name || activeRoom.name}</div>
-                    <div className="rp-floor-status">IN PROGRESS · TENSION {Math.round(activeRoom.snapshot.tension)}</div>
-                    <div className="rp-floor-cast">
-                      {activeRoom.snapshot.characters.filter((c) => !c.transient && !c.dead).map((c) => (
-                        <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                          <span className="dot" style={{ background: c.palette.cloak }} />
-                          {c.name}
-                        </span>
-                      ))}
+            {activeRoom && (() => {
+              const archived = isArchivedRoom(activeRoom);
+              const canRegen = archived && !!(activeRoom.prompt && activeRoom.prompt.trim());
+              return (
+                <div className={`rp-floor is-active ${archived ? "is-archived" : ""}`} role="listitem">
+                  <div className="rp-floor-num">{building.floors.length + 1}</div>
+                  <div className="rp-floor-body">
+                    <MiniRoomCanvas room={activeRoom} />
+                    <div className="rp-floor-info">
+                      <div className="rp-floor-name">{activeRoom.snapshot.scene.name || activeRoom.name}</div>
+                      {archived ? (
+                        <div className="rp-floor-status" style={{ color: "var(--ink-dim)" }}>
+                          ARCHIVED FLOOR — TOP-DOWN LAYOUT
+                        </div>
+                      ) : (
+                        <div className="rp-floor-status">IN PROGRESS · TENSION {Math.round(activeRoom.snapshot.tension)}</div>
+                      )}
+                      <div className="rp-floor-cast">
+                        {activeRoom.snapshot.characters.filter((c) => !c.transient && !c.dead).map((c) => (
+                          <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                            <span className="dot" style={{ background: c.palette.cloak }} />
+                            {c.name}
+                          </span>
+                        ))}
+                      </div>
                     </div>
+                    {archived ? (
+                      canRegen ? (
+                        <button
+                          type="button"
+                          className="rp-floor-enter"
+                          onClick={() => onRegenerateRoom(activeRoom)}
+                          title="Rebuild this floor as a side-elevation layout"
+                        >REGENERATE ›</button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="rp-floor-enter"
+                          disabled
+                          title="No original prompt saved — delete from localStorage to start fresh"
+                          style={{ opacity: 0.5, cursor: "not-allowed" }}
+                        >NO PROMPT</button>
+                      )
+                    ) : (
+                      <button type="button" className="rp-floor-enter" onClick={() => onEnterRoom(activeRoom.id)}>ENTER ›</button>
+                    )}
                   </div>
-                  <button type="button" className="rp-floor-enter" onClick={() => onEnterRoom(activeRoom.id)}>ENTER ›</button>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {building.floors.slice().reverse().map((floor, ri) => (
               <FloorCard key={floor.id} floor={floor} floorNum={building.floors.length - ri} />
@@ -1145,24 +1266,16 @@ export function RPG() {
         </div>
       )}
 
-      {/* Stage (canvas) */}
+      {/* Stage (canvas) — sized by ResizeObserver to fill the frame. */}
       <div className="rp-stage">
-        {(() => {
-          const dims = sceneDims(state.scene);
-          return (
-            <div className="rp-canvas-frame">
-              <canvas
-                ref={canvasRef}
-                key={`${dims.w}x${dims.h}`}
-                width={dims.pxW}
-                height={dims.pxH}
-                className={`rp-canvas ${state.pending ? "is-skippable" : ""}`}
-                onClick={state.pending ? onSkipLine : undefined}
-                title={state.pending ? "Click to skip this line" : undefined}
-              />
-            </div>
-          );
-        })()}
+        <div className="rp-canvas-frame">
+          <canvas
+            ref={canvasRef}
+            className={`rp-canvas ${state.pending ? "is-skippable" : ""}`}
+            onClick={state.pending ? onSkipLine : undefined}
+            title={state.pending ? "Click to skip this line" : undefined}
+          />
+        </div>
 
         {/* Desktop cast drawer (left) — hidden on mobile via media query */}
         <aside className="rp-drawer rp-drawer-left" aria-label="Cast">
@@ -1906,7 +2019,9 @@ function drawRoomItems(
     // Scatter slightly so multiple items at the same anchor don't stack.
     const scatter = (i % 3) * 5 - 5;
     const px = a.x * TILE_PX + TILE_PX / 2 + scatter;
-    const py = a.y * TILE_PX + TILE_PX - 4;
+    // Sit the marker just above the anchor tile's bottom so items perch
+    // on surfaces (floor, table, chair) instead of floating mid-tile.
+    const py = a.y * TILE_PX + TILE_PX - 8;
     // Warm glow pulse
     const pulse = 0.5 + 0.3 * Math.sin(now / 600 + i * 1.7);
     ctx.globalAlpha = pulse;
@@ -1926,29 +2041,60 @@ function drawRoomItems(
   ctx.restore();
 }
 
+type TileCtx = {
+  floorY: number;
+  neighborLeft: string;
+  neighborRight: string;
+  neighborAbove: string;
+  neighborBelow: string;
+};
+
 function drawScene(
   ctx: CanvasRenderingContext2D,
   scene: {
     map: string[];
+    floor_y: number;
     anchors: Record<string, { x: number; y: number }>;
     palette?: Record<string, { name: string; color: string; walkable: boolean; glow?: boolean }>;
   },
   now: number,
 ) {
-  const W = ctx.canvas.width;
-  const H = ctx.canvas.height;
   const rows = scene.map.length;
   const cols = scene.map[0]?.length ?? 0;
-  ctx.fillStyle = "#0a0806";
-  ctx.fillRect(0, 0, W, H);
+  const floorY = scene.floor_y;
+  const worldW = cols * TILE_PX;
+  const worldH = rows * TILE_PX;
+  const floorPx = (floorY + 1) * TILE_PX;
+
+  // Vertical gradient background: night sky → interior → foundation.
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, worldH);
+  bgGrad.addColorStop(0, "#12182a");
+  const interiorStart = Math.max(0, (floorPx - TILE_PX * 6) / worldH);
+  const floorStop = Math.max(0.001, Math.min(1, floorPx / worldH));
+  bgGrad.addColorStop(Math.min(interiorStart, floorStop - 0.001), "#1a1628");
+  bgGrad.addColorStop(Math.max(0.001, floorStop - 0.001), "#140f10");
+  bgGrad.addColorStop(floorStop, "#0f0906");
+  bgGrad.addColorStop(1, "#05030a");
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, worldW, worldH);
+
+  // Tiles
   for (let r = 0; r < rows; r++) {
     const row = scene.map[r] ?? "";
     for (let c = 0; c < cols; c++) {
       const ch = row[c] ?? " ";
-      drawTile(ctx, c, r, ch, now, scene.palette);
+      const sctx: TileCtx = {
+        floorY,
+        neighborLeft: row[c - 1] ?? " ",
+        neighborRight: row[c + 1] ?? " ",
+        neighborAbove: scene.map[r - 1]?.[c] ?? " ",
+        neighborBelow: scene.map[r + 1]?.[c] ?? " ",
+      };
+      drawTile(ctx, c, r, ch, now, sctx, scene.palette);
     }
   }
-  // Hearth glow pool from any '~' tile + custom glow tiles
+
+  // Hearth/custom glow pool
   for (let r = 0; r < rows; r++) {
     const row = scene.map[r] ?? "";
     for (let c = 0; c < cols; c++) {
@@ -1956,13 +2102,13 @@ function drawScene(
       const isGlow = ch === "~" || scene.palette?.[ch]?.glow;
       if (!isGlow) continue;
       const hx = c * TILE_PX + TILE_PX / 2;
-      const hy = r * TILE_PX + TILE_PX / 2;
+      const hy = r * TILE_PX + TILE_PX - TILE_PX / 3;
       const flick = (Math.sin(now / 180) + 1) / 2;
-      const g = ctx.createRadialGradient(hx, hy, 10, hx, hy, 110);
-      g.addColorStop(0, `rgba(255,200,110,${0.18 + flick * 0.08})`);
+      const g = ctx.createRadialGradient(hx, hy, 12, hx, hy, 160);
+      g.addColorStop(0, `rgba(255,200,110,${0.22 + flick * 0.1})`);
       g.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = g;
-      ctx.fillRect(hx - 110, hy - 110, 220, 220);
+      ctx.fillRect(hx - 160, hy - 160, 320, 320);
     }
   }
 }
@@ -1973,119 +2119,231 @@ function drawTile(
   r: number,
   ch: string,
   now: number,
+  sctx: TileCtx,
   palette?: Record<string, { name: string; color: string; walkable: boolean; glow?: boolean }>,
 ) {
   const x = c * TILE_PX;
   const y = r * TILE_PX;
+  const T = TILE_PX;
+  const isWallish = (g: string) => g === "#" || g === "R";
+
+  // Below-floor foundation: packed earth for air/empty tiles below floor row.
+  if (r > sctx.floorY && (ch === "." || ch === " ")) {
+    ctx.fillStyle = "#1a1209";
+    ctx.fillRect(x, y, T, T);
+    ctx.fillStyle = "rgba(88,60,30,0.22)";
+    const seed = (c * 31 + r * 17) % 11;
+    for (let i = 0; i < 5; i++) {
+      const dx = ((seed + i * 7) * 3) % (T - 4);
+      const dy = ((seed + i * 13) * 2) % (T - 4);
+      ctx.fillRect(x + dx, y + dy, 2, 2);
+    }
+    return;
+  }
+
+  // Air above floor: let the gradient show through.
+  if (ch === "." || ch === " ") return;
+
   if (ch === "#") {
-    ctx.fillStyle = "#2a2218";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "#1a1410";
-    ctx.fillRect(x, y + TILE_PX - 3, TILE_PX, 3);
-  } else if (ch === "R") {
+    // Stone wall column (side-view).
+    ctx.fillStyle = "#2b2218";
+    ctx.fillRect(x, y, T, T);
+    ctx.fillStyle = "rgba(80,60,38,0.45)";
+    for (let j = 0; j < T; j += 10) ctx.fillRect(x, y + j, T, 1);
+    ctx.fillStyle = "rgba(30,20,10,0.55)";
+    for (let i = 0; i < T; i += 8) ctx.fillRect(x + i, y, 1, T);
+    ctx.fillStyle = "#1c150f";
+    ctx.fillRect(x, y + T - 3, T, 3);
+    // Top cap when above is air — parapet highlight.
+    if (!isWallish(sctx.neighborAbove) && sctx.neighborAbove !== "l") {
+      ctx.fillStyle = "#4a3a24";
+      ctx.fillRect(x, y, T, 3);
+      ctx.fillStyle = "#5e4a2a";
+      ctx.fillRect(x, y, T, 1);
+    }
+    return;
+  }
+
+  if (ch === "R") {
+    // Ceiling beam / roof timber.
     ctx.fillStyle = "#3a2a18";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "#1a1208";
-    for (let i = 0; i < TILE_PX; i += 6) ctx.fillRect(x + i, y, 1, TILE_PX);
-  } else if (ch === "~") {
+    ctx.fillRect(x, y, T, T);
+    ctx.fillStyle = "rgba(20,12,4,0.6)";
+    for (let i = 0; i < T; i += 6) ctx.fillRect(x + i, y + 3, 1, T - 6);
+    ctx.fillStyle = "#1f1509";
+    ctx.fillRect(x, y + T - 2, T, 2);
+    return;
+  }
+
+  if (ch === "|") {
+    // Door: planked door in a frame, sitting on the floor.
+    ctx.fillStyle = "#3a2818";
+    ctx.fillRect(x, y, T, T);
+    ctx.fillStyle = "#0a0604";
+    ctx.fillRect(x + 4, y + 2, T - 8, T - 4);
+    ctx.fillStyle = "#5a3a1e";
+    ctx.fillRect(x + 5, y + 3, T - 10, T - 6);
+    ctx.fillStyle = "#2a1808";
+    for (let i = 0; i < T - 10; i += 5) ctx.fillRect(x + 5 + i, y + 3, 1, T - 6);
+    ctx.fillStyle = "#c8a060";
+    ctx.fillRect(x + T - 9, y + T / 2, 2, 2);
+    return;
+  }
+
+  if (ch === "~") {
+    // Hearth: stone arch with flames at the base.
     const flick = (Math.sin(now / 160 + (c + r)) + 1) / 2;
-    ctx.fillStyle = "#1a1208";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = `rgba(220,120,50,${0.55 + flick * 0.25})`;
-    ctx.fillRect(x + 4, y + 4, TILE_PX - 8, TILE_PX - 8);
-    ctx.fillStyle = `rgba(255,200,110,${0.35 + flick * 0.35})`;
-    ctx.fillRect(x + 9, y + 9, TILE_PX - 18, TILE_PX - 18);
-  } else if (ch === "w") {
-    ctx.fillStyle = "#1a1a28";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "rgba(120,140,180,0.4)";
-    ctx.fillRect(x + 3, y + 3, TILE_PX - 6, TILE_PX - 6);
-    ctx.strokeStyle = "#3a2c1c";
-    ctx.strokeRect(x + 3, y + 3, TILE_PX - 6, TILE_PX - 6);
-    ctx.beginPath();
-    ctx.moveTo(x + TILE_PX / 2, y + 3);
-    ctx.lineTo(x + TILE_PX / 2, y + TILE_PX - 3);
-    ctx.stroke();
-  } else if (ch === "b") {
-    ctx.fillStyle = "#181410";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "#4a3a28";
-    ctx.fillRect(x + 2, y + 10, TILE_PX - 4, TILE_PX - 14);
-    ctx.fillStyle = "#7a6a58";
-    ctx.fillRect(x + 2, y + 10, TILE_PX - 4, 4);
-  } else if (ch === "t") {
-    ctx.fillStyle = "#181410";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "#3a2a18";
-    ctx.fillRect(x + 2, y + 10, TILE_PX - 4, TILE_PX - 14);
+    // Back of hearth (dark)
+    ctx.fillStyle = "#0d0804";
+    ctx.fillRect(x + 2, y + 2, T - 4, T - 4);
+    // Logs at floor
+    ctx.fillStyle = "#3a2414";
+    ctx.fillRect(x + 4, y + T - 12, T - 8, 7);
+    ctx.fillStyle = "#1a0c06";
+    ctx.fillRect(x + 4, y + T - 6, T - 8, 2);
+    // Flames
+    const flameH = Math.round(16 + flick * 10);
+    const flameBaseY = y + T - 12;
+    ctx.fillStyle = `rgba(220,120,50,${0.6 + flick * 0.25})`;
+    ctx.fillRect(x + 6, flameBaseY - flameH, T - 12, flameH);
+    ctx.fillStyle = `rgba(255,180,80,${0.55 + flick * 0.3})`;
+    ctx.fillRect(x + 10, flameBaseY - flameH + 4, T - 20, flameH - 8);
+    ctx.fillStyle = `rgba(255,230,140,${0.55 + flick * 0.3})`;
+    ctx.fillRect(x + T / 2 - 2, flameBaseY - flameH + 10, 4, flameH - 14);
+    // Stone arch surround
     ctx.fillStyle = "#5a4028";
-    ctx.fillRect(x + 2, y + 10, TILE_PX - 4, 3);
-  } else if (ch === "c") {
-    ctx.fillStyle = "#141014";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "#3a2a18";
-    ctx.fillRect(x + 6, y + 12, TILE_PX - 12, TILE_PX - 18);
-    ctx.fillStyle = "#5a4028";
-    ctx.fillRect(x + 6, y + 6, TILE_PX - 12, 4);
-  } else if (ch === "=") {
-    ctx.fillStyle = "#181410";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "#5a3a18";
-    ctx.fillRect(x, y + 8, TILE_PX, 14);
-    ctx.fillStyle = "#7a5028";
-    ctx.fillRect(x, y + 8, TILE_PX, 2);
-    ctx.fillStyle = "#2a1808";
-    ctx.fillRect(x, y + 20, TILE_PX, 2);
-  } else if (ch === "l") {
-    ctx.fillStyle = "#141014";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    const flick = (Math.sin(now / 170) + 1) / 2;
+    ctx.fillRect(x, y, 3, T);
+    ctx.fillRect(x + T - 3, y, 3, T);
+    ctx.fillRect(x, y, T, 3);
+    ctx.fillStyle = "#7a5a38";
+    ctx.fillRect(x, y, T, 1);
+    return;
+  }
+
+  if (ch === "w") {
+    // Window: wall column with a 4-pane insert.
+    ctx.fillStyle = "#2b2218";
+    ctx.fillRect(x, y, T, T);
+    ctx.fillStyle = "rgba(80,60,38,0.45)";
+    for (let j = 0; j < T; j += 10) ctx.fillRect(x, y + j, T, 1);
+    // Pane glow (nightlike)
+    ctx.fillStyle = "#24344a";
+    ctx.fillRect(x + 5, y + 5, T - 10, T - 10);
+    ctx.fillStyle = "rgba(160,190,220,0.35)";
+    ctx.fillRect(x + 5, y + 5, T - 10, T - 10);
+    // Mullions
     ctx.fillStyle = "#3a2c1c";
-    ctx.fillRect(x + 12, y + 4, 6, 14);
-    ctx.fillStyle = `rgba(255,200,110,${0.5 + flick * 0.4})`;
-    ctx.fillRect(x + 13, y + 7, 4, 8);
-  } else if (ch === "|") {
-    ctx.fillStyle = "#181410";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "#5a3a1a";
-    ctx.fillRect(x + 2, y, TILE_PX - 4, TILE_PX);
+    ctx.fillRect(x + T / 2 - 1, y + 5, 2, T - 10);
+    ctx.fillRect(x + 5, y + T / 2 - 1, T - 10, 2);
+    // Frame
+    ctx.fillStyle = "#4a3a24";
+    ctx.fillRect(x + 4, y + 4, T - 8, 2);
+    ctx.fillRect(x + 4, y + T - 6, T - 8, 2);
+    ctx.fillRect(x + 4, y + 4, 2, T - 8);
+    ctx.fillRect(x + T - 6, y + 4, 2, T - 8);
+    return;
+  }
+
+  if (ch === "b") {
+    // Bed: low mattress on the floor with pillow + legs.
+    ctx.fillStyle = "#4a3a28";
+    ctx.fillRect(x + 2, y + T - 16, T - 4, 12);
+    ctx.fillStyle = "#6a4a2e";
+    ctx.fillRect(x + 2, y + T - 16, T - 4, 4);
+    ctx.fillStyle = "#c8b898";
+    ctx.fillRect(x + 3, y + T - 18, 12, 4);
+    ctx.fillStyle = "#2a1e10";
+    ctx.fillRect(x + 3, y + T - 4, 3, 4);
+    ctx.fillRect(x + T - 6, y + T - 4, 3, 4);
+    return;
+  }
+
+  if (ch === "t") {
+    // Table: slab top on two legs, sitting on floor row.
+    ctx.fillStyle = "#5a4028";
+    ctx.fillRect(x + 1, y + T - 20, T - 2, 4);
+    ctx.fillStyle = "#7a5a38";
+    ctx.fillRect(x + 1, y + T - 20, T - 2, 1);
+    ctx.fillStyle = "#3a2818";
+    ctx.fillRect(x + 4, y + T - 16, 3, 16);
+    ctx.fillRect(x + T - 7, y + T - 16, 3, 16);
+    return;
+  }
+
+  if (ch === "c") {
+    // Chair: backrest + seat + legs (side profile).
+    ctx.fillStyle = "#3a2818";
+    ctx.fillRect(x + T - 14, y + T - 26, 4, 20);
+    ctx.fillStyle = "#5a4028";
+    ctx.fillRect(x + 4, y + T - 14, T - 8, 4);
+    ctx.fillStyle = "#3a2818";
+    ctx.fillRect(x + 5, y + T - 10, 2, 10);
+    ctx.fillRect(x + T - 7, y + T - 10, 2, 10);
+    return;
+  }
+
+  if (ch === "=") {
+    // Bar/counter: waist-high slab along the floor.
+    ctx.fillStyle = "#5a3a18";
+    ctx.fillRect(x, y + T - 24, T, 20);
+    ctx.fillStyle = "#7a5028";
+    ctx.fillRect(x, y + T - 24, T, 3);
     ctx.fillStyle = "#2a1808";
-    ctx.fillRect(x + 5, y + 6, TILE_PX - 10, TILE_PX - 12);
-  } else if (palette && palette[ch]) {
-    // Custom palette tile — use the declared color, respect walkability
-    // with a visual distinction (darker floor under walkable, block for not).
+    ctx.fillRect(x, y + T - 6, T, 2);
+    ctx.fillStyle = "rgba(20,10,2,0.4)";
+    for (let i = 0; i < T; i += 8) ctx.fillRect(x + i, y + T - 20, 1, 16);
+    return;
+  }
+
+  if (ch === "l") {
+    // Lantern: chain descending from ceiling, box with flame glow.
+    const flick = (Math.sin(now / 170 + c) + 1) / 2;
+    // Chain
+    ctx.fillStyle = "#3a2c1c";
+    for (let dy = 0; dy < T / 2 - 6; dy += 3) {
+      ctx.fillRect(x + T / 2 - 1, y + dy, 2, 2);
+    }
+    // Lantern frame
+    ctx.fillStyle = "#3a2c1c";
+    ctx.fillRect(x + T / 2 - 8, y + T / 2 - 4, 16, 16);
+    // Glass
+    ctx.fillStyle = `rgba(255,200,110,${0.55 + flick * 0.3})`;
+    ctx.fillRect(x + T / 2 - 6, y + T / 2 - 2, 12, 12);
+    // Flame
+    ctx.fillStyle = `rgba(255,230,150,${0.7 + flick * 0.25})`;
+    ctx.fillRect(x + T / 2 - 2, y + T / 2 + 2, 4, 6);
+    // Cap
+    ctx.fillStyle = "#4a3a24";
+    ctx.fillRect(x + T / 2 - 9, y + T / 2 - 7, 18, 3);
+    return;
+  }
+
+  if (palette && palette[ch]) {
     const entry = palette[ch];
-    // Floor underneath for readability
-    ctx.fillStyle = "#141014";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
     if (entry.walkable) {
-      // subtle tint, not a full block, so you see "something here"
+      // Thin floor mat near the bottom of the tile.
       ctx.fillStyle = entry.color;
-      ctx.globalAlpha = 0.35;
-      ctx.fillRect(x + 4, y + 4, TILE_PX - 8, TILE_PX - 8);
+      ctx.globalAlpha = 0.45;
+      ctx.fillRect(x + 2, y + T - 6, T - 4, 4);
       ctx.globalAlpha = 1;
     } else {
-      // solid block with a highlight
+      // Side silhouette standing on the floor.
+      const h = Math.min(T - 4, 26);
       ctx.fillStyle = entry.color;
-      ctx.fillRect(x + 3, y + 5, TILE_PX - 6, TILE_PX - 10);
-      // 1px highlight on top
-      ctx.fillStyle = "rgba(255,255,255,0.15)";
-      ctx.fillRect(x + 3, y + 5, TILE_PX - 6, 2);
-      // 1px shadow bottom
-      ctx.fillStyle = "rgba(0,0,0,0.35)";
-      ctx.fillRect(x + 3, y + TILE_PX - 7, TILE_PX - 6, 2);
+      ctx.fillRect(x + 3, y + T - h - 2, T - 6, h);
+      ctx.fillStyle = "rgba(255,255,255,0.18)";
+      ctx.fillRect(x + 3, y + T - h - 2, T - 6, 2);
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.fillRect(x + 3, y + T - 4, T - 6, 2);
       if (entry.glow) {
         const flick = (Math.sin(now / 200 + c + r) + 1) / 2;
         ctx.fillStyle = `rgba(255,220,140,${0.3 + flick * 0.2})`;
-        ctx.fillRect(x + 8, y + 10, TILE_PX - 16, TILE_PX - 20);
+        ctx.fillRect(x + 7, y + T - h + 2, T - 14, h - 8);
       }
     }
-  } else {
-    ctx.fillStyle = "#141014";
-    ctx.fillRect(x, y, TILE_PX, TILE_PX);
-    ctx.fillStyle = "#1a1520";
-    if (((c + r) % 2) === 0) ctx.fillRect(x + 2, y + 2, TILE_PX - 4, TILE_PX - 4);
+    return;
   }
+  // Unknown glyph — leave gradient.
 }
 
 type AnyScene = { anchors: Record<string, { x: number; y: number }> };
@@ -2107,172 +2365,196 @@ function drawCharacter(
   now: number,
   all?: Character[],
 ) {
-  // If another live character shares this tile, nudge this sprite
-  // left/right so they don't literally overlap. Order by id so the
-  // split is stable across frames.
+  // Overlap nudge: spread characters sharing the same x horizontally.
   let xOffset = 0;
   if (all) {
-    const here = all.filter(
-      (o) =>
-        !o.dead &&
-        Math.abs(o.pos.x - c.pos.x) < 0.6 &&
-        Math.abs(o.pos.y - c.pos.y) < 0.6,
-    );
+    const here = all.filter((o) => !o.dead && Math.abs(o.pos.x - c.pos.x) < 0.6);
     if (here.length > 1) {
       const sorted = [...here].sort((a, b) => a.id.localeCompare(b.id));
       const idx = sorted.findIndex((o) => o.id === c.id);
-      const n = sorted.length;
-      // Spread centered on the tile: positions {-6, -2, +2, +6} etc.
-      const spread = 4;
-      const mid = (n - 1) / 2;
-      xOffset = Math.round((idx - mid) * spread);
+      const mid = (sorted.length - 1) / 2;
+      xOffset = Math.round((idx - mid) * 7);
     }
   }
-  // Hit-flash: horizontal shake + red tint for ~420ms after taking damage.
-  let shakeX = 0;
+
   const struck = c.struckUntil ?? 0;
   const struckPhase = struck > now ? (struck - now) / 420 : 0;
-  if (struckPhase > 0) {
-    shakeX = Math.sin(now / 28) * 3 * struckPhase;
-  }
-  const x = c.pos.x * TILE_PX + xOffset + shakeX;
-  const y = c.pos.y * TILE_PX;
+  const shakeX = struckPhase > 0 ? Math.sin(now / 28) * 3 * struckPhase : 0;
+
+  const T = TILE_PX;
+  // Feet pinned to the bottom of the standing tile.
+  const feetX = c.pos.x * T + T / 2 + xOffset + shakeX;
+  const feetY = (c.pos.y + 1) * T;
   const seed = c.id.charCodeAt(0);
-  const bob = Math.sin(now / 620 + seed) * 0.6;
   const step = c.moving ? Math.sin(now / 110 + seed) : 0;
-  // Is the character at a "sitting" anchor and not moving? Use seated pose.
+  const breath = c.moving ? 0 : Math.sin(now / 800 + seed * 2.1) * 0.5;
+  const bob = Math.sin(now / 620 + seed) * 0.3;
+
+  // Seated pose when parked next to a chair/bed/bar anchor.
   let seated = false;
   if (!c.moving) {
     for (const [name, a] of Object.entries(scene.anchors)) {
       if (!isSeatedAnchor(name)) continue;
-      const d = Math.abs(c.pos.x - a.x) + Math.abs(c.pos.y - a.y);
-      if (d < 0.6) { seated = true; break; }
+      if (Math.abs(c.pos.x - a.x) < 0.6) { seated = true; break; }
     }
   }
-  const py = y + bob + (c.moving ? -Math.abs(step) * 1.4 : 0);
 
-  // shadow
+  // Shadow at feet.
   ctx.fillStyle = "rgba(0,0,0,0.45)";
   ctx.beginPath();
-  ctx.ellipse(x + TILE_PX / 2, y + TILE_PX - 3, 8, 3, 0, 0, Math.PI * 2);
+  ctx.ellipse(feetX, feetY - 1.5, 10, 3, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  // Sprite dimensions (authored facing right).
+  const bodyH = seated ? 16 : 22;
+  const headR = 5;
+  const hipY = feetY - (seated ? 8 : 12);
+  const bodyTopY = hipY - bodyH + bob + breath;
+  const headCy = bodyTopY - headR - 1;
+
   if (c.dead) {
-    // Fallen sprite: rotated, flattened, greyed.
     ctx.save();
     ctx.globalAlpha = 0.55;
     ctx.fillStyle = c.palette.cloak;
-    ctx.fillRect(x + 4, py + 20, 22, 7);
+    ctx.fillRect(feetX - 14, feetY - 7, 28, 5);
     ctx.fillStyle = c.palette.body;
-    ctx.fillRect(x + 2, py + 19, 8, 7);
-    ctx.fillStyle = "#2a1a1a";
-    ctx.fillText("✕", x + 5, py + 22);
+    ctx.beginPath();
+    ctx.arc(feetX - 12, feetY - 6, 4, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
-    // name
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(x, py + TILE_PX - 2, TILE_PX, 9);
-    ctx.fillStyle = "#7a7a7a";
     ctx.font = "9px ui-monospace, SF Mono, monospace";
     ctx.textBaseline = "top";
-    ctx.fillText(c.name, x + 2, py + TILE_PX);
+    ctx.textAlign = "center";
+    const nameW = Math.min(90, ctx.measureText(c.name).width + 10);
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(feetX - nameW / 2, feetY + 3, nameW, 10);
+    ctx.fillStyle = "#7a7a7a";
+    ctx.fillText(c.name, feetX, feetY + 4);
+    ctx.textAlign = "start";
     return;
   }
 
-  // Idle breathing: subtle vertical pulse when stationary.
-  const breath = c.moving ? 0 : Math.sin(now / 800 + seed * 2.1) * 0.5;
-
-  if (seated) {
-    ctx.fillStyle = c.palette.cloak;
-    ctx.fillRect(x + 9, py + 16 + breath, 12, 10);
-    ctx.fillStyle = c.palette.body;
-    ctx.fillRect(x + 10, py + 10 + breath, 10, 7);
-    const [ex, ey] = eyeOffset(c.facing);
-    ctx.fillStyle = "#0a0806";
-    ctx.fillRect(x + 12 + ex, py + 13 + ey + breath, 2, 1);
-    ctx.fillRect(x + 16 + ex, py + 13 + ey + breath, 2, 1);
-    ctx.fillStyle = c.palette.accent;
-    ctx.fillRect(x + 9, py + 8 + breath, 12, 2);
-    // Hands resting on lap
-    ctx.fillStyle = c.palette.cloak;
-    ctx.fillRect(x + 7, py + 19 + breath, 3, 4);
-    ctx.fillRect(x + 20, py + 19 + breath, 3, 4);
-  } else {
-    ctx.fillStyle = c.palette.cloak;
-    ctx.fillRect(x + 9, py + 13 + breath, 12, 12);
-    const legOff = Math.round(step * 2);
-    ctx.fillRect(x + 10, py + 24 + legOff, 3, 3);
-    ctx.fillRect(x + 17, py + 24 - legOff, 3, 3);
-    // Arm swing when walking, gentle sway when idle
-    const armOff = c.moving
-      ? Math.round(step * 1.5)
-      : Math.round(Math.sin(now / 1200 + seed * 3.3) * 0.8);
-    ctx.fillRect(x + 7, py + 14 + armOff + breath, 2, 6);
-    ctx.fillRect(x + 21, py + 14 - armOff + breath, 2, 6);
-    ctx.fillStyle = c.palette.body;
-    ctx.fillRect(x + 10, py + 7 + breath, 10, 7);
-    const [ex, ey] = eyeOffset(c.facing);
-    // Blink every ~4 seconds
-    const blinkCycle = ((now / 1000 + seed) % 4);
-    const blinking = blinkCycle > 3.85;
-    ctx.fillStyle = "#0a0806";
-    if (!blinking) {
-      ctx.fillRect(x + 12 + ex, py + 10 + ey + breath, 2, 1);
-      ctx.fillRect(x + 16 + ex, py + 10 + ey + breath, 2, 1);
-    } else {
-      ctx.fillRect(x + 12 + ex, py + 10 + ey + breath, 2, 0.5);
-      ctx.fillRect(x + 16 + ex, py + 10 + ey + breath, 2, 0.5);
-    }
-    ctx.fillStyle = c.palette.accent;
-    ctx.fillRect(x + 9, py + 5 + breath, 12, 2);
+  // Mirror sprite drawing for facing left.
+  ctx.save();
+  if (c.facing === "left") {
+    ctx.translate(feetX, 0);
+    ctx.scale(-1, 1);
+    ctx.translate(-feetX, 0);
   }
 
-  // Hit-flash red tint on top of the sprite.
+  if (seated) {
+    // Torso
+    ctx.fillStyle = c.palette.cloak;
+    ctx.fillRect(feetX - 5, bodyTopY, 10, bodyH);
+    ctx.fillStyle = c.palette.accent;
+    ctx.fillRect(feetX - 5, bodyTopY, 10, 2);
+    // Hand resting forward
+    ctx.fillStyle = c.palette.cloak;
+    ctx.fillRect(feetX + 2, bodyTopY + 4, 4, 7);
+    // Seated legs extend forward
+    ctx.fillStyle = "#2a1e10";
+    ctx.fillRect(feetX - 2, hipY, 10, 3);
+    ctx.fillRect(feetX + 4, hipY + 2, 3, 6);
+    // Head
+    ctx.fillStyle = c.palette.body;
+    ctx.beginPath();
+    ctx.arc(feetX, headCy, headR, 0, Math.PI * 2);
+    ctx.fill();
+    // Hair/hat accent
+    ctx.fillStyle = c.palette.accent;
+    ctx.fillRect(feetX - headR, headCy - headR, headR * 2, 2);
+    // Eye (right-facing)
+    ctx.fillStyle = "#0a0806";
+    ctx.fillRect(feetX + 1, headCy - 1, 2, 2);
+  } else {
+    // Legs (x-split, swing opposite-phase)
+    const legOff = Math.round(step * 3);
+    ctx.fillStyle = "#2a1e10";
+    ctx.fillRect(feetX - 3, hipY, 3, 12 + legOff);
+    ctx.fillRect(feetX, hipY, 3, 12 - legOff);
+    // Feet stubs
+    ctx.fillStyle = "#1a1008";
+    ctx.fillRect(feetX - 5, feetY - 2, 5, 2);
+    ctx.fillRect(feetX + 1, feetY - 2, 5, 2);
+    // Torso
+    ctx.fillStyle = c.palette.cloak;
+    ctx.fillRect(feetX - 4, bodyTopY, 8, bodyH);
+    // Accent trim
+    ctx.fillStyle = c.palette.accent;
+    ctx.fillRect(feetX - 4, bodyTopY, 8, 2);
+    // Arms (back + front, opposite-phase to legs)
+    const armOff = c.moving
+      ? Math.round(step * 3)
+      : Math.round(Math.sin(now / 1200 + seed * 3.3) * 0.8);
+    ctx.fillStyle = c.palette.cloak;
+    ctx.fillRect(feetX - 5, bodyTopY + 4 - armOff, 2, 9);
+    ctx.fillRect(feetX + 3, bodyTopY + 4 + armOff, 2, 9);
+    // Head
+    ctx.fillStyle = c.palette.body;
+    ctx.beginPath();
+    ctx.arc(feetX, headCy, headR, 0, Math.PI * 2);
+    ctx.fill();
+    // Hair/hat
+    ctx.fillStyle = c.palette.accent;
+    ctx.fillRect(feetX - headR, headCy - headR, headR * 2, 2);
+    // Eye + blink
+    const blink = ((now / 1000 + seed) % 4) > 3.85;
+    ctx.fillStyle = "#0a0806";
+    if (!blink) ctx.fillRect(feetX + 1, headCy - 1, 2, 2);
+    else ctx.fillRect(feetX + 1, headCy - 1, 2, 0.5);
+  }
+
+  ctx.restore();
+
+  // Hit-flash red tint (screen-axis).
   if (struckPhase > 0) {
     ctx.save();
     ctx.globalAlpha = 0.55 * struckPhase;
     ctx.fillStyle = "#d9614a";
-    ctx.fillRect(x + 5, py + 4, 22, 24);
+    ctx.fillRect(feetX - 7, bodyTopY - 2, 14, bodyH + headR * 2 + 4);
     ctx.restore();
   }
 
-  // Inventory: show first item name as a tiny floating label, plus dots for extras.
+  // Labels (screen-axis, above/below the sprite).
+  ctx.font = "9px ui-monospace, SF Mono, monospace";
+  ctx.textBaseline = "top";
+  ctx.textAlign = "center";
+  const nameW = Math.min(90, ctx.measureText(c.name).width + 10);
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(feetX - nameW / 2, feetY + 3, nameW, 10);
+  ctx.fillStyle = c.palette.accent;
+  ctx.fillText(c.name, feetX, feetY + 4);
+  ctx.textAlign = "start";
+
+  // HP pips beneath the name band.
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = i < c.hp ? "#5ec26a" : "#3a3a3a";
+    ctx.fillRect(feetX + nameW / 2 - 3 - i * 4, feetY + 15, 3, 3);
+  }
+
+  // Inventory label above the head.
   if (c.inventory.length > 0) {
-    const iy = py + (seated ? 28 : 27);
-    // First item as a readable label
     const itemName = c.inventory[0].length > 12
       ? c.inventory[0].slice(0, 10) + "…"
       : c.inventory[0];
     ctx.font = "7px ui-monospace, SF Mono, monospace";
     const iw = ctx.measureText(itemName).width + 6;
-    ctx.fillStyle = "rgba(232, 200, 106, 0.18)";
-    ctx.fillRect(x + 1, iy, iw, 9);
+    const iy = headCy - headR - 11;
+    ctx.fillStyle = "rgba(232, 200, 106, 0.25)";
+    ctx.fillRect(feetX - iw / 2, iy, iw, 9);
     ctx.fillStyle = "#e8c86a";
-    ctx.textBaseline = "top";
-    ctx.fillText(itemName, x + 4, iy + 1);
-    // Extra item dots
+    ctx.textAlign = "center";
+    ctx.fillText(itemName, feetX, iy + 1);
+    ctx.textAlign = "start";
     for (let i = 1; i < Math.min(c.inventory.length, 4); i++) {
       ctx.fillStyle = "#e8c86a";
-      ctx.fillRect(x + iw + 2 + (i - 1) * 4, iy + 3, 2, 2);
+      ctx.fillRect(feetX + iw / 2 + 2 + (i - 1) * 4, iy + 3, 2, 2);
     }
   }
 
-  // name
-  ctx.fillStyle = "rgba(0,0,0,0.55)";
-  ctx.fillRect(x, py + TILE_PX - 2, TILE_PX, 9);
-  ctx.fillStyle = c.palette.accent;
-  ctx.font = "9px ui-monospace, SF Mono, monospace";
-  ctx.textBaseline = "top";
-  ctx.fillText(c.name, x + 2, py + TILE_PX);
-  // hp dots (green pips)
-  const hpMax = 3;
-  for (let i = 0; i < hpMax; i++) {
-    ctx.fillStyle = i < c.hp ? "#5ec26a" : "#3a3a3a";
-    ctx.fillRect(x + TILE_PX - 3 - i * 4, py + TILE_PX - 5, 3, 3);
-  }
-  // emote
-  if (c.emote) drawEmote(ctx, x + TILE_PX / 2, py - 4, c.emote.kind, now);
-  // speech bubble
-  if (c.speech) drawSpeech(ctx, x + TILE_PX / 2, py - 18, c.speech.text);
+  // Emote + speech above the head.
+  if (c.emote) drawEmote(ctx, feetX, headCy - headR - 14, c.emote.kind, now);
+  if (c.speech) drawSpeech(ctx, feetX, headCy - headR - 24, c.speech.text);
 }
 
 function drawSpeech(ctx: CanvasRenderingContext2D, cx: number, cy: number, text: string) {
@@ -2395,15 +2677,6 @@ function drawEmote(ctx: CanvasRenderingContext2D, cx: number, cy: number, kind: 
   ctx.textBaseline = "top";
 }
 
-function eyeOffset(f: "up" | "down" | "left" | "right"): [number, number] {
-  switch (f) {
-    case "left": return [-1, 0];
-    case "right": return [1, 0];
-    case "up": return [0, -1];
-    case "down": return [0, 1];
-  }
-}
-
 function wrapText(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -2429,13 +2702,15 @@ function drawDialog(
   ctx: CanvasRenderingContext2D,
   pending: { full: string; shown: number; kind: "narration" | "ambient" | "speech_marrow" | "speech_soren" | "action" } | null,
   now: number,
+  W: number,
+  H: number,
 ) {
   if (!pending) return;
   const shown = pending.full.slice(0, Math.floor(pending.shown));
   const boxX = 6;
   const boxH = 92;
-  const boxY = ctx.canvas.height - boxH - 6;
-  const boxW = ctx.canvas.width - 12;
+  const boxY = H - boxH - 6;
+  const boxW = W - 12;
 
   // Semi-transparent tint so the scene shows through
   ctx.fillStyle = "rgba(11, 10, 22, 0.45)";
@@ -2508,7 +2783,7 @@ function drawDialog(
   }
 }
 
-function drawTimeOfDay(ctx: CanvasRenderingContext2D, hour: number) {
+function drawTimeOfDay(ctx: CanvasRenderingContext2D, hour: number, W: number, H: number) {
   let overlay = "rgba(0,0,0,0)";
   if (hour < 5) overlay = "rgba(20,30,60,0.40)";
   else if (hour < 8) overlay = "rgba(120,80,80,0.18)";
@@ -2516,12 +2791,10 @@ function drawTimeOfDay(ctx: CanvasRenderingContext2D, hour: number) {
   else if (hour < 20) overlay = "rgba(150,80,40,0.20)";
   else overlay = "rgba(20,30,60,0.40)";
   ctx.fillStyle = overlay;
-  ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.fillRect(0, 0, W, H);
 }
 
-function drawVignette(ctx: CanvasRenderingContext2D) {
-  const W = ctx.canvas.width;
-  const H = ctx.canvas.height;
+function drawVignette(ctx: CanvasRenderingContext2D, W: number, H: number) {
   const g = ctx.createRadialGradient(
     W / 2, H / 2, W * 0.2,
     W / 2, H / 2, W * 0.7,
@@ -2529,5 +2802,5 @@ function drawVignette(ctx: CanvasRenderingContext2D) {
   g.addColorStop(0, "rgba(0,0,0,0)");
   g.addColorStop(1, "rgba(0,0,0,0.7)");
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.fillRect(0, 0, W, H);
 }

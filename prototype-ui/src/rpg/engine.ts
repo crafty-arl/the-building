@@ -5,12 +5,15 @@
 // Started as a strict literal for Marrow + Soren; broadened to string so
 // the director can spawn new characters (strangers, antagonists).
 export type CharId = string;
-export type Facing = "up" | "down" | "left" | "right";
+export type Facing = "left" | "right";
 export type EmoteKind = "startle" | "still" | "warm" | "sad" | "puzzle";
 
 export interface Tile { x: number; y: number }
 
 export type Mood = "watchful" | "tender" | "withdrawn" | "alert" | "weary" | "still";
+
+// 1D walk segment — side-view pathing is linear along the floor row.
+export interface WalkSegment { fromX: number; toX: number; startedAt: number }
 
 export interface Character {
   id: CharId;
@@ -19,9 +22,7 @@ export interface Character {
   pos: { x: number; y: number };
   facing: Facing;
   moving: boolean;
-  path: Tile[] | null;
-  pathIdx: number;
-  segProgress: number;
+  path: WalkSegment | null;
   goal: string | null;
   palette: { body: string; cloak: string; accent: string };
   emote: { kind: EmoteKind; until: number } | null;
@@ -104,6 +105,7 @@ export interface Scene {
   id: string;
   name: string;
   map: string[];
+  floor_y: number;
   anchors: Record<string, Tile>;
   starts: Record<CharId, string>;
   schedules: Record<CharId, ScheduleSlot[]>;
@@ -173,6 +175,7 @@ export interface GameState {
   buildingId: string;
   floorIndex: number;
   inheritedMemory: string;
+  roomPrompt?: string;
 }
 
 // ─── Building persistence ─────────────────────────────────────────────────
@@ -639,6 +642,7 @@ export const SCENES: Record<string, Scene> = {
   cabin: {
     id: "cabin",
     name: "a cabin, before morning",
+    floor_y: 9,
     map: [
       "################",
       "#..............#",
@@ -687,6 +691,7 @@ export const SCENES: Record<string, Scene> = {
   porch: {
     id: "porch",
     name: "a porch, after the storm",
+    floor_y: 9,
     map: [
       "RRRRRRRRRRRRRRRR",
       "#..............#",
@@ -732,6 +737,7 @@ export const SCENES: Record<string, Scene> = {
   inn: {
     id: "inn",
     name: "an inn, off-season",
+    floor_y: 9,
     map: [
       "################",
       "#..............#",
@@ -775,77 +781,87 @@ export const SCENES: Record<string, Scene> = {
   },
 };
 
-export const MAP_COLS = 16;
-export const MAP_ROWS = 11;
-export const TILE_PX = 30;
+export const TILE_PX = 44;
 
-const CORE_WALKABLE = (c: string) => c === "." || c === "|";
+// Phaser-style horizontal camera: deadzone + lerp + bounds clamp. Pure math
+// so RPG.tsx and tests share the same implementation. `viewportW` is the
+// CSS-pixel width of the canvas container; `worldW` is the world pixel width
+// (cols * TILE_PX). `zoom` is applied before the camera transform, so the
+// viewport sees `viewportW / zoom` world pixels at once.
+export interface CameraStep {
+  worldX: number;
+}
+export function stepCamera(
+  cam: CameraStep,
+  targetX: number,
+  viewportW: number,
+  worldW: number,
+  zoom: number,
+): CameraStep {
+  const scaledWorldW = worldW * zoom;
+  const viewCenterWorld = cam.worldX + viewportW / (2 * zoom);
+  const dx = targetX - viewCenterWorld;
+  const deadzone = Math.min(160, viewportW * 0.18) / zoom;
+  let next = cam.worldX;
+  if (Math.abs(dx) > deadzone) next += dx * 0.12;
+  if (scaledWorldW <= viewportW) {
+    next = (worldW - viewportW / zoom) / 2;
+  } else {
+    const maxX = worldW - viewportW / zoom;
+    if (next < 0) next = 0;
+    else if (next > maxX) next = maxX;
+  }
+  return { worldX: next };
+}
 
-export function isWalkable(scene: Scene, x: number, y: number): boolean {
-  if (y < 0 || y >= scene.map.length) return false;
-  const row = scene.map[y];
+// Side-view walkability: the floor row. A column is blocked by a solid wall
+// (`#` or custom palette entry with walkable:false) even on the floor row.
+export function isFloorWalkable(scene: Scene, x: number): boolean {
+  const row = scene.map[scene.floor_y] ?? "";
   if (x < 0 || x >= row.length) return false;
   const ch = row[x];
-  if (CORE_WALKABLE(ch)) return true;
-  // Custom palette tile? Respect its walkable flag.
+  if (ch === "." || ch === "|") return true;
   const entry = scene.palette?.[ch];
   return entry?.walkable ?? false;
 }
 
-export function aStar(scene: Scene, start: Tile, goal: Tile): Tile[] | null {
-  if (!isWalkable(scene, goal.x, goal.y)) return null;
-  if (start.x === goal.x && start.y === goal.y) return [start];
-  const key = (x: number, y: number) => `${x},${y}`;
-  const h = (x: number, y: number) => Math.abs(x - goal.x) + Math.abs(y - goal.y);
-  const open = new Map<string, { t: Tile; g: number; f: number }>();
-  const parent = new Map<string, string | null>();
-  const closed = new Set<string>();
-  const s = key(start.x, start.y);
-  open.set(s, { t: start, g: 0, f: h(start.x, start.y) });
-  parent.set(s, null);
-  while (open.size > 0) {
-    let curKey = "";
-    let cur: { t: Tile; g: number; f: number } | null = null;
-    for (const [k, n] of open) if (!cur || n.f < cur.f) { curKey = k; cur = n; }
-    if (!cur) break;
-    if (cur.t.x === goal.x && cur.t.y === goal.y) {
-      const path: Tile[] = [];
-      let k: string | null = curKey;
-      while (k) {
-        const [xs, ys] = k.split(",");
-        path.unshift({ x: +xs, y: +ys });
-        k = parent.get(k) ?? null;
-      }
-      return path;
-    }
-    open.delete(curKey);
-    closed.add(curKey);
-    const nbrs: Tile[] = [
-      { x: cur.t.x + 1, y: cur.t.y },
-      { x: cur.t.x - 1, y: cur.t.y },
-      { x: cur.t.x, y: cur.t.y + 1 },
-      { x: cur.t.x, y: cur.t.y - 1 },
-    ];
-    for (const n of nbrs) {
-      if (!isWalkable(scene, n.x, n.y)) continue;
-      const k = key(n.x, n.y);
-      if (closed.has(k)) continue;
-      const g = cur.g + 1;
-      const ex = open.get(k);
-      if (!ex || g < ex.g) {
-        open.set(k, { t: n, g, f: g + h(n.x, n.y) });
-        parent.set(k, curKey);
-      }
-    }
+// Clamp a target x into the nearest walkable floor column, skipping walls.
+export function standingX(scene: Scene, targetX: number): number {
+  const cols = scene.map[0]?.length ?? 0;
+  const want = Math.max(0, Math.min(cols - 1, Math.round(targetX)));
+  if (isFloorWalkable(scene, want)) return want;
+  // Scan outward for the nearest walkable column.
+  for (let d = 1; d < cols; d++) {
+    if (isFloorWalkable(scene, want - d)) return want - d;
+    if (isFloorWalkable(scene, want + d)) return want + d;
   }
-  return null;
+  return want;
 }
 
-function facingFrom(a: Tile, b: Tile): Facing {
-  if (b.x > a.x) return "right";
-  if (b.x < a.x) return "left";
-  if (b.y > a.y) return "down";
-  return "up";
+// Start a 1D walk segment from the character's current x to a target x.
+// Target is clamped to the nearest walkable floor column. Returns false if
+// the character is already at the target (no walk needed).
+export function walkTo(
+  scene: Scene,
+  char: Character,
+  targetX: number,
+  now: number,
+): boolean {
+  const clamped = standingX(scene, targetX);
+  if (Math.abs(char.pos.x - clamped) < 0.1) {
+    char.path = null;
+    char.moving = false;
+    return false;
+  }
+  char.path = { fromX: char.pos.x, toX: clamped, startedAt: now };
+  char.moving = true;
+  return true;
+}
+
+function facingFromDx(dx: number, prev: Facing): Facing {
+  if (dx > 0) return "right";
+  if (dx < 0) return "left";
+  return prev;
 }
 
 // ─── Characters ────────────────────────────────────────────────────────────
@@ -856,11 +872,9 @@ export const CHARACTERS: Character[] = [
     name: "Marrow",
     description: "older, careful, steady with words, willing to speak their mind when it matters",
     pos: { x: 4, y: 3 },
-    facing: "down",
+    facing: "right",
     moving: false,
     path: null,
-    pathIdx: 0,
-    segProgress: 0,
     goal: null,
     palette: { body: "#e8d0a8", cloak: "#5a4432", accent: "#c89a3a" },
     emote: null,
@@ -893,8 +907,6 @@ export const CHARACTERS: Character[] = [
     facing: "left",
     moving: false,
     path: null,
-    pathIdx: 0,
-    segProgress: 0,
     goal: null,
     palette: { body: "#d8b89a", cloak: "#3a4a6a", accent: "#8ab0c8" },
     emote: null,
@@ -1172,7 +1184,7 @@ function nearestAnchorTo(scene: Scene, pos: { x: number; y: number }): string {
   let best = "center";
   let bestD = Infinity;
   for (const [name, a] of Object.entries(scene.anchors)) {
-    const d = Math.abs(a.x - pos.x) + Math.abs(a.y - pos.y);
+    const d = Math.abs(a.x - pos.x);
     if (d < bestD) { bestD = d; best = name; }
   }
   return best;
@@ -1256,10 +1268,7 @@ export function runTool(s: GameState, tool: Tool, now: number): ToolResult {
         goalName = nearest;
         if (!anchor) return { kind: "done" };
       }
-      const start = { x: Math.round(c.pos.x), y: Math.round(c.pos.y) };
-      c.path = aStar(s.scene, start, anchor);
-      c.pathIdx = 0;
-      c.segProgress = 0;
+      walkTo(s.scene, c, anchor.x, now);
       c.goal = goalName;
       s.lastDirectedAt = now;
       return { kind: "done" };
@@ -1335,12 +1344,10 @@ export function runTool(s: GameState, tool: Tool, now: number): ToolResult {
         id,
         name: tool.name.slice(0, 30) || id,
         description: tool.description ?? "a figure on the floor",
-        pos: { x: anchor.x, y: anchor.y },
-        facing: "down",
+        pos: { x: anchor.x, y: s.scene.floor_y },
+        facing: "right",
         moving: false,
         path: null,
-        pathIdx: 0,
-        segProgress: 0,
         goal: null,
         palette: palettes[tool.palette ?? "grey"],
         emote: null,
@@ -1372,11 +1379,7 @@ export function runTool(s: GameState, tool: Tool, now: number): ToolResult {
       attacker.emote = { kind: "startle", until: now + 600 };
       // Attacker faces the target.
       const dx = target.pos.x - attacker.pos.x;
-      const dy = target.pos.y - attacker.pos.y;
-      attacker.facing =
-        Math.abs(dx) > Math.abs(dy)
-          ? dx > 0 ? "right" : "left"
-          : dy > 0 ? "down" : "up";
+      attacker.facing = dx >= 0 ? "right" : "left";
       if (target.hp === 0) target.dead = true;
       addTension(s, 8);
       logAction(
@@ -1480,85 +1483,65 @@ export function tickSchedules(s: GameState, now: number) {
       c.scheduleAnchor = desired;
       continue;
     }
-    const dx = Math.abs(c.pos.x - anchor.x);
-    const dy = Math.abs(c.pos.y - anchor.y);
-    if (dx < 0.6 && dy < 0.6) {
+    if (Math.abs(c.pos.x - anchor.x) < 0.6) {
       c.scheduleAnchor = desired;
       continue;
     }
-    const start = { x: Math.round(c.pos.x), y: Math.round(c.pos.y) };
-    c.path = aStar(s.scene, start, anchor);
-    c.pathIdx = 0;
-    c.segProgress = 0;
+    walkTo(s.scene, c, anchor.x, now);
     c.goal = `schedule:${desired}`;
     c.scheduleAnchor = desired;
   }
 }
 
 export function tickCharacters(s: GameState, now: number, dt: number) {
+  const floorY = s.scene.floor_y;
   for (const c of s.characters) {
     if (c.emote && now >= c.emote.until) c.emote = null;
     if (c.speech && now >= c.speech.until) c.speech = null;
     if (c.dead) { c.moving = false; c.path = null; continue; }
-    if (c.path && c.pathIdx < c.path.length - 1) {
-      // Peek at the next tile. If another live character currently occupies
-      // it (within half a tile), pause this character's walk this frame —
-      // keeps them from stacking on the same tile.
-      const nextTile = c.path[c.pathIdx + 1];
-      const occupied = s.characters.some((o) => {
-        if (o.id === c.id || o.dead) return false;
-        const d = Math.abs(o.pos.x - nextTile.x) + Math.abs(o.pos.y - nextTile.y);
-        return d < 0.55;
-      });
-      if (occupied) {
-        // Track how long this character has been blocked. After a short
-        // wait they give up and stop rather than hover forever.
-        const blockedFor = s.blockedAt[c.id] ?? now;
-        s.blockedAt[c.id] = blockedFor;
-        if (now - blockedFor > 1500) {
-          c.path = null;
-          c.moving = false;
-          delete s.blockedAt[c.id];
-        } else {
-          c.moving = false;
-        }
-        continue;
-      }
-      delete s.blockedAt[c.id];
-      c.segProgress += dt * WALK_SPEED;
-      while (c.path && c.segProgress >= 1 && c.pathIdx < c.path.length - 1) {
-        c.segProgress -= 1;
-        c.pathIdx += 1;
-      }
-      if (c.path && c.pathIdx < c.path.length - 1) {
-        const a = c.path[c.pathIdx];
-        const b = c.path[c.pathIdx + 1];
-        c.pos = {
-          x: a.x + (b.x - a.x) * c.segProgress,
-          y: a.y + (b.y - a.y) * c.segProgress,
-        };
-        c.facing = facingFrom(a, b);
-        c.moving = true;
-      } else if (c.path) {
-        const end = c.path[c.path.length - 1];
-        c.pos = { x: end.x, y: end.y };
-        c.moving = false;
-        // Face toward the center of the room after arriving, so characters
-        // look "into" the scene rather than at a wall.
-        const cx = (s.scene.map[0]?.length ?? 16) / 2;
-        const cy = (s.scene.map.length ?? 11) / 2;
-        const dx = cx - end.x;
-        const dy = cy - end.y;
-        if (Math.abs(dx) > Math.abs(dy)) {
-          c.facing = dx > 0 ? "right" : "left";
-        } else {
-          c.facing = dy > 0 ? "down" : "up";
-        }
-        c.path = null;
-      }
-    } else {
+    // Anchor feet to the floor row at all times — characters never drift
+    // off the floor line in side view.
+    c.pos.y = floorY;
+    if (!c.path) {
       c.moving = false;
+      continue;
     }
+    const dir = c.path.toX > c.path.fromX ? 1 : -1;
+    // Occupancy check: if another live character is within half a tile in
+    // the direction we're walking, stall for a short while then give up.
+    const occupied = s.characters.some((o) => {
+      if (o.id === c.id || o.dead) return false;
+      const ahead = c.pos.x + dir * 0.5;
+      return Math.abs(o.pos.x - ahead) < 0.55 && Math.abs(o.pos.y - c.pos.y) < 0.6;
+    });
+    if (occupied) {
+      const blockedFor = s.blockedAt[c.id] ?? now;
+      s.blockedAt[c.id] = blockedFor;
+      if (now - blockedFor > 1500) {
+        c.path = null;
+        c.moving = false;
+        delete s.blockedAt[c.id];
+      } else {
+        c.moving = false;
+      }
+      continue;
+    }
+    delete s.blockedAt[c.id];
+    const step = dt * WALK_SPEED * dir;
+    const next = c.pos.x + step;
+    // Arrived?
+    if ((dir > 0 && next >= c.path.toX) || (dir < 0 && next <= c.path.toX)) {
+      c.pos.x = c.path.toX;
+      c.path = null;
+      c.moving = false;
+      // Face toward room center so the character doesn't look at a wall.
+      const cx = (s.scene.map[0]?.length ?? 16) / 2;
+      c.facing = cx >= c.pos.x ? "right" : "left";
+      continue;
+    }
+    c.pos.x = next;
+    c.facing = facingFromDx(dir, c.facing);
+    c.moving = true;
   }
 }
 
@@ -1715,6 +1698,20 @@ export interface SavedRoom {
   lastPlayedAt: number;
   createdAt: number;
   buildingId: string;
+  projection?: "side" | "top_down";
+  prompt?: string;
+}
+
+// True when a saved room predates the side-elevation rewrite and therefore
+// can't be rendered correctly with the current tile/character pipeline.
+// Missing `projection` or `snapshot.scene.floor_y` both indicate a legacy
+// top-down snapshot; reinterpreting them as side view produces walls
+// floating in mid-air and agents standing on ceilings.
+export function isArchivedRoom(r: SavedRoom): boolean {
+  if (r.projection === "side") return false;
+  if (r.projection === "top_down") return true;
+  const floorY = (r.snapshot?.scene as { floor_y?: number } | undefined)?.floor_y;
+  return typeof floorY !== "number";
 }
 
 // Observers get notified on storage errors so the UI can surface them.
@@ -1938,6 +1935,8 @@ export function saveRoom(s: GameState): void {
     lastPlayedAt: Date.now(),
     createdAt: existing?.createdAt ?? Date.now(),
     buildingId: s.buildingId || "",
+    projection: "side",
+    prompt: s.roomPrompt || existing?.prompt || "",
   };
   lib[s.roomId] = entry;
   writeLibrary(lib);
@@ -1974,6 +1973,7 @@ export function loadRoomById(id: string, now: number): GameState | null {
   if (typeof snap.buildingId !== "string") snap.buildingId = "";
   if (typeof snap.floorIndex !== "number") snap.floorIndex = -1;
   if (typeof snap.inheritedMemory !== "string") snap.inheritedMemory = "";
+  if (typeof snap.roomPrompt !== "string") snap.roomPrompt = entry.prompt || "";
   return snap;
 }
 
@@ -2281,12 +2281,10 @@ export function survivorsToCharacters(
       id: sv.id,
       name: sv.name,
       description: sv.description,
-      pos: { x: anchor.x, y: anchor.y },
-      facing: "down" as const,
+      pos: { x: anchor.x, y: scene.floor_y },
+      facing: "right" as const,
       moving: false,
       path: null,
-      pathIdx: 0,
-      segProgress: 0,
       goal: null,
       palette: { ...sv.palette },
       emote: null,
@@ -2358,8 +2356,6 @@ function sanitizeForPack(s: GameState): RoomPackV1 {
       ...c,
       pos: { ...c.pos },
       path: null,
-      pathIdx: 0,
-      segProgress: 0,
       moving: false,
       goal: null,
       emote: null,
@@ -2556,6 +2552,7 @@ export function initialState(now: number): GameState {
     buildingId: "",
     floorIndex: -1,
     inheritedMemory: "",
+    roomPrompt: "",
   };
 }
 
@@ -2688,11 +2685,9 @@ export function applyScene(s: GameState, scene: Scene): void {
     const positional = `slot_${i}`;
     const startName =
       scene.starts[c.id] ?? scene.starts[positional] ?? "center";
-    const startTile = scene.anchors[startName] ?? { x: 4, y: 4 };
-    c.pos = { x: startTile.x, y: startTile.y };
+    const startTile = scene.anchors[startName] ?? { x: 4, y: scene.floor_y };
+    c.pos = { x: startTile.x, y: scene.floor_y };
     c.path = null;
-    c.pathIdx = 0;
-    c.segProgress = 0;
     c.goal = null;
     c.scheduleAnchor = null;
     c.schedule =
@@ -2734,7 +2729,6 @@ export function buildPlan(s: GameState, card: CardDef): Plan {
         { op: "narrate", text: "A single knock. Then the room's own silence, uninterrupted." },
         { op: "emote", charId: aId, kind: "startle", ms: 1400 },
         { op: "walk", charId: aId, toAnchor: "door_in" },
-        { op: "face", charId: aId, facing: "down" },
         { op: "narrate", text: `${aName} opens the door. Night. No one. A patch of cold where someone might have been.` },
         { op: "wait", ms: 1200 },
         { op: "narrate", text: `${aName} closes the door. The fire resumes its counting.` },
@@ -2841,6 +2835,8 @@ export const CHARACTER_PALETTES: Record<
 export interface GeneratedRoom {
   name: string;
   map: string[];
+  floor_y?: number;
+  projection?: "top_down" | "side";
   anchors: Record<string, [number, number]>;
   palette?: Record<string, PaletteEntry>;
   lines: string[];
@@ -2980,32 +2976,40 @@ export async function streamRoom(
 
 // Adapt a worker-shaped GeneratedRoom into a Scene (with starts + schedules).
 export function sceneFromRoom(room: GeneratedRoom): Scene {
+  const rows = room.map.length;
+  // If the worker didn't emit floor_y (old payloads), pick a sane default so
+  // the UI doesn't crash — characters stand in the lower third of the room.
+  const floor_y =
+    typeof room.floor_y === "number"
+      ? room.floor_y
+      : Math.max(1, Math.min(rows - 2, Math.floor(rows * 0.8)));
   const anchors: Record<string, Tile> = {};
+  // Snap "stand here" anchors (bed_side, table_side, door_in, center, etc.)
+  // to the floor row so 1D walks always land on walkable columns. Visual
+  // anchors that name a wall-mounted object (hearth_face, window_sill,
+  // lantern, altar) keep their authored y so tile art can attach to walls.
+  const isVisualAnchor = (name: string) =>
+    /^(hearth|window|lantern|altar|shelf|ceiling|beam|chimney)/.test(name);
   for (const [name, [x, y]] of Object.entries(room.anchors)) {
-    anchors[name] = { x, y };
+    anchors[name] = { x, y: isVisualAnchor(name) ? y : floor_y };
   }
   if (!anchors["center"]) {
-    // Fallback: pick first walkable tile
-    for (let r = 0; r < room.map.length; r++) {
-      const row = room.map[r];
-      for (let c = 0; c < row.length; c++) {
-        if (row[c] === ".") {
-          anchors["center"] = { x: c, y: r };
-          break;
-        }
-      }
-      if (anchors["center"]) break;
+    // Fallback: pick middle of the floor row.
+    const row = room.map[floor_y] ?? "";
+    let best = Math.floor(row.length / 2);
+    for (let d = 0; d < row.length; d++) {
+      if (row[best + d] === ".") { best += d; break; }
+      if (row[best - d] === ".") { best -= d; break; }
     }
+    anchors["center"] = { x: best, y: floor_y };
   }
   const names = Object.keys(anchors);
   const half = Math.ceil(names.length / 2);
-  // We key starts/schedules by both the legacy slot ids ("marrow"/"soren")
-  // AND by positional keys ("slot_0"/"slot_1"). applyScene falls back to
-  // positional when a character's id doesn't match a slot name directly.
   return {
     id: `gen_${Date.now()}`,
     name: room.name || "a room",
     map: room.map,
+    floor_y,
     anchors,
     palette: room.palette,
     starts: {
@@ -3023,11 +3027,13 @@ export function sceneFromRoom(room: GeneratedRoom): Scene {
   };
 }
 
+// Nearest anchor by horizontal distance (side view — vertical drift is nil
+// because characters are pinned to floor_y).
 function nearestAnchor(scene: Scene, pos: { x: number; y: number }): string {
   let best = "center";
   let bestD = Infinity;
   for (const [name, a] of Object.entries(scene.anchors)) {
-    const d = Math.abs(a.x - pos.x) + Math.abs(a.y - pos.y);
+    const d = Math.abs(a.x - pos.x);
     if (d < bestD) { bestD = d; best = name; }
   }
   return best;
