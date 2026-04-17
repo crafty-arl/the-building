@@ -109,6 +109,12 @@ export interface CompleteResult {
 }
 
 export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
+  // Trip-wire: this legacy HTTP layer is kept in-tree only as a one-PR revert
+  // safety net. The production path lives in pi-complete.ts — if this log
+  // appears, something is routing around the pi-ai migration.
+  console.warn(
+    `[cf-ai] LEGACY complete() invoked — expected pi-ai. model=${opts.model.id} sessionId=${opts.sessionId}`,
+  );
   const url = `https://api.cloudflare.com/client/v4/accounts/${opts.accountId}/ai/v1/chat/completions`;
   const body: Record<string, unknown> = {
     model: opts.model.id,
