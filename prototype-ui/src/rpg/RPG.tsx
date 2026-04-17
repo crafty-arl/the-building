@@ -279,6 +279,16 @@ export function RPG() {
   const camRef = useRef<{ worldX: number; zoom: number }>({ worldX: 0, zoom: 1 });
   // Canvas CSS size in logical pixels, updated by ResizeObserver.
   const canvasSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+  // Pointer-drag to pan the camera horizontally. While `active` is true the
+  // follow camera is disabled so user input isn't fought by `stepCamera`.
+  const dragRef = useRef<{
+    active: boolean;
+    pointerId: number | null;
+    startX: number;
+    startCamX: number;
+    moved: number;
+  }>({ active: false, pointerId: null, startX: 0, startCamX: 0, moved: 0 });
+  const [isDragging, setIsDragging] = useState(false);
   // Most recent character that moved or spoke — used to pick the camera's
   // follow target so the camera prefers whoever is "active" right now.
   const lastActiveRef = useRef<string | null>(null);
@@ -391,13 +401,25 @@ export function RPG() {
 
       // Target x (world px) is the follow character's center.
       const targetX = follow ? (follow.pos.x + 0.5) * TILE_PX : worldW / 2;
-      camRef.current.worldX = stepCamera(
-        camRef.current,
-        targetX,
-        cssW,
-        worldW,
-        zoom,
-      ).worldX;
+      if (dragRef.current.active) {
+        // User is panning — clamp to world bounds; skip follow.
+        const scaledWorldW = worldW * zoom;
+        if (scaledWorldW <= cssW) {
+          camRef.current.worldX = (worldW - cssW / zoom) / 2;
+        } else {
+          const maxX = worldW - cssW / zoom;
+          if (camRef.current.worldX < 0) camRef.current.worldX = 0;
+          else if (camRef.current.worldX > maxX) camRef.current.worldX = maxX;
+        }
+      } else {
+        camRef.current.worldX = stepCamera(
+          camRef.current,
+          targetX,
+          cssW,
+          worldW,
+          zoom,
+        ).worldX;
+      }
 
       // Reset to identity, clear.
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1353,9 +1375,57 @@ export function RPG() {
         <div className="rp-canvas-frame">
           <canvas
             ref={canvasRef}
-            className={`rp-canvas ${state.pending ? "is-skippable" : ""}`}
-            onClick={state.pending ? onSkipLine : undefined}
-            title={state.pending ? "Click to skip this line" : undefined}
+            className={`rp-canvas ${state.pending ? "is-skippable" : ""} ${isDragging ? "is-dragging" : ""}`}
+            onPointerDown={(e) => {
+              if (e.button !== 0 && e.pointerType === "mouse") return;
+              dragRef.current = {
+                active: true,
+                pointerId: e.pointerId,
+                startX: e.clientX,
+                startCamX: camRef.current.worldX,
+                moved: 0,
+              };
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setIsDragging(true);
+            }}
+            onPointerMove={(e) => {
+              const d = dragRef.current;
+              if (!d.active || d.pointerId !== e.pointerId) return;
+              const dx = e.clientX - d.startX;
+              if (Math.abs(dx) > d.moved) d.moved = Math.abs(dx);
+              const zoom = camRef.current.zoom || 1;
+              // Drag right → scene shifts right → camera.worldX decreases.
+              camRef.current.worldX = d.startCamX - dx / zoom;
+            }}
+            onPointerUp={(e) => {
+              const d = dragRef.current;
+              if (d.pointerId !== e.pointerId) return;
+              d.active = false;
+              d.pointerId = null;
+              if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                e.currentTarget.releasePointerCapture(e.pointerId);
+              }
+              setIsDragging(false);
+            }}
+            onPointerCancel={(e) => {
+              const d = dragRef.current;
+              if (d.pointerId !== e.pointerId) return;
+              d.active = false;
+              d.pointerId = null;
+              d.moved = 0;
+              setIsDragging(false);
+            }}
+            onClick={(e) => {
+              // Suppress skip when the pointer moved more than a threshold —
+              // that was a pan, not a tap.
+              if (dragRef.current.moved > 6) {
+                dragRef.current.moved = 0;
+                return;
+              }
+              dragRef.current.moved = 0;
+              if (state.pending) onSkipLine();
+            }}
+            title={state.pending ? "Click to skip · drag to pan" : "Drag to pan"}
           />
           <div className="rp-hud-top" aria-hidden={false}>
             <div className="rp-top-center">
