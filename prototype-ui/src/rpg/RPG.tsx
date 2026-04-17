@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   type GameState,
   type Character,
@@ -18,8 +18,6 @@ import {
   maybeDirectorTick,
   simHour,
   SCENES,
-  streamRoom,
-  sceneFromRoom,
   applyScene,
   fetchDirective,
   loadState,
@@ -59,11 +57,18 @@ import {
   buildInheritedMemory,
   survivorsToCharacters,
   fetchEpitaph,
-  type BuildingContext,
   onSyncNeeded,
 } from "./engine";
 import { pushBuilding, pushRoom, pullAll, enqueuePush, getDeviceId, releaseLock } from "./sync";
 import { clearSession, getUserId } from "./auth";
+import { useHearth, slugify, stripNpcPrefix } from "./useHearth";
+import { StageConsole } from "./StageConsole";
+import {
+  characterFromNpc,
+  charactersFromHello,
+  npcCharId,
+  sceneFromHello,
+} from "./hearth-projection";
 import type { PullResult } from "./sync";
 import {
   INGREDIENTS,
@@ -95,7 +100,6 @@ export function RPG() {
     if (hasSharedRoomInUrl()) return initialState(now);
     return loadState(now) ?? initialState(now);
   });
-  const [showLog, setShowLog] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showObjectives, setShowObjectives] = useState(false);
   const [activeSheet, setActiveSheet] = useState<null | "profile" | "season" | "settings" | "menu">(null);
@@ -171,9 +175,6 @@ export function RPG() {
       } else if (e.key === "s" || e.key === "S") {
         e.preventDefault();
         onSkipLine();
-      } else if (e.key === "l" || e.key === "L") {
-        e.preventDefault();
-        setShowLog((v) => !v);
       } else if (e.key === "/") {
         e.preventDefault();
         directiveInput()?.focus();
@@ -454,21 +455,7 @@ export function RPG() {
     setLlmFallbackReason(null);
     const now = performance.now();
 
-    // Real progress driven by SSE phase events. Specialists run in parallel
-    // on the worker, so phases may arrive in any order — we take the max of
-    // the known phase percentages rather than assuming a fixed sequence.
-    const PHASE_PROGRESS: Record<string, { pct: number; stage: string }> = {
-      started: { pct: 10, stage: "building the floor…" },
-      map: { pct: 40, stage: "floor plan ready — placing furniture…" },
-      narrative: {
-        pct: 70,
-        stage: "stakes and items placed — writing characters…",
-      },
-      profiles: { pct: 90, stage: "characters ready — opening the floor…" },
-      done: { pct: 100, stage: "ready." },
-    };
-    let shownPct = 0;
-    setRoomProgress({ pct: 10, stage: "building the floor…" });
+    setRoomProgress({ pct: 10, stage: "waking the room…" });
 
     try {
       // Every floor lives inside the building — materialize one if the player
@@ -479,40 +466,11 @@ export function RPG() {
         setBuilding(bld);
         void saveBuilding(bld);
       }
-      // Resolve which survivors will actually carry forward. Honor the
-      // player's picks from the "WHO COMES UP" widget; fall back to the
-      // first up to 3 if nothing is picked.
-      const pickedSurvivors: SurvivorRecord[] = selectedSurvivors.length > 0
-        ? bld.roster.filter((s) => selectedSurvivors.includes(s.id))
-        : bld.roster.slice(0, 3);
-      const bc: BuildingContext = {
-        survivors: pickedSurvivors.slice(0, 3).map((s) => ({
-          name: s.name,
-          description: s.description,
-          backstory: s.backstory,
-          inventory: [...s.inventory],
-        })),
-        ghosts: bld.ghosts.slice(-3).map((g) => ({
-          name: g.name,
-          description: g.description,
-          causeOfDeath: g.causeOfDeath,
-          diedInRoomName: g.diedInRoomName,
-        })),
-        previousRoomSummary: bld.floors.length > 0
-          ? bld.floors[bld.floors.length - 1].storySummary
-          : "",
-        floorNumber: bld.floors.length,
-      };
-      const room = await streamRoom(prompt, (phase) => {
-        const entry = PHASE_PROGRESS[phase];
-        if (!entry) return;
-        if (entry.pct >= shownPct) {
-          shownPct = entry.pct;
-          setRoomProgress({ pct: entry.pct, stage: entry.stage });
-        }
-      }, bc);
-      const scene = sceneFromRoom(room);
-      applyScene(stateRef.current, scene); resetCodaFlag();
+      // Allocate room identity. The room's geometry, anchors, palette, and
+      // resident NPCs are NOT authored here — Hearth authors them and the
+      // hello message projects them into state via projectHelloIntoState
+      // below. Until hello arrives, the canvas shows the placeholder scene
+      // from initialState (SCENES.cabin) and a "waking the room…" toast.
       const live = stateRef.current;
       live.roomId = newRoomId();
       live.roomPrompt = prompt;
@@ -521,8 +479,6 @@ export function RPG() {
       live.inheritedMemory = buildInheritedMemory(bld);
       bld.activeRoomId = live.roomId;
       bld.lastPlayedAt = Date.now();
-      // Record the ingredient categories we just picked so progress
-      // objectives ("use 3 categories") can count them.
       ensureProgressState(bld);
       const cats = Array.from(new Set(
         selectedIngredients
@@ -534,62 +490,19 @@ export function RPG() {
       const done = evaluateObjectives(bld);
       for (const o of done) flashToast(`+${o.reward} · ${o.label}`);
       void saveBuilding(bld);
-      if (pickedSurvivors.length > 0) {
-        live.characters = survivorsToCharacters(pickedSurvivors, scene);
-      } else if (bld.roster.length >= 2) {
-        live.characters = survivorsToCharacters(bld.roster.slice(0, 3), scene);
-      }
       live.simStartedAt = now;
       live.lastAmbient = now;
       live.phase = "playing";
-      const lines = room.lines.length > 0 ? room.lines : [`A ${prompt}.`];
       live.pending = {
-        full: lines[0],
+        full: "Waking the room…",
         shown: 0,
         sealedAt: now,
         kind: "narration",
       };
-      for (let i = 1; i < lines.length; i++) {
-        live.narrationQueue.push({ line: lines[i], kind: "narration" });
-      }
-      live.roomContext = `${room.name}. ${lines.join(" ")}${room.stakes ? " Stakes: " + room.stakes : ""}`;
-      live.roomItems = room.items ?? [];
-      live.stakes = room.stakes ?? "";
-      if (room.openingFlags) {
-        for (const [k, v] of Object.entries(room.openingFlags)) {
-          live.flags[k.toLowerCase().replace(/[^a-z0-9_]+/g, "_").slice(0, 40)] =
-            String(v).slice(0, 40);
-        }
-      }
-      // Apply profiles/moods by cast position — the worker still uses the
-      // "marrow"/"soren" keys as structural slot names but we map them onto
-      // whichever characters are in positions 0 and 1.
-      const slotKeys: ("marrow" | "soren")[] = ["marrow", "soren"];
-      const cast = live.characters.filter((c) => !c.transient);
-      if (room.moods) {
-        const validMoods = new Set([
-          "watchful", "tender", "withdrawn", "alert", "weary", "still",
-        ]);
-        cast.forEach((c, i) => {
-          const m = room.moods?.[slotKeys[i]];
-          if (m && validMoods.has(m)) c.mood = m as typeof c.mood;
-        });
-      }
-      if (room.profiles) {
-        cast.forEach((c, i) => {
-          const p = room.profiles?.[slotKeys[i]];
-          if (!p) return;
-          if (p.name && p.name.trim()) c.name = p.name.trim();
-          if (p.description && p.description.trim()) c.description = p.description.trim();
-          if (p.palette && CHARACTER_PALETTES[p.palette]) {
-            c.palette = { ...CHARACTER_PALETTES[p.palette] };
-          }
-          c.backstory = p.backstory ?? "";
-          c.objective = p.objective ?? "";
-          c.motive = p.motive ?? "";
-        });
-      }
-      setRoomProgress({ pct: 100, stage: "ready." });
+      live.roomContext = prompt;
+      live.roomItems = [];
+      live.stakes = "";
+      setRoomProgress({ pct: 100, stage: "connecting…" });
       window.setTimeout(() => setRoomProgress(null), 500);
       setSelectedIngredients([]);
       setSelectedSurvivors([]);
@@ -709,6 +622,66 @@ export function RPG() {
     clearSaved();
     setState({ ...live });
   };
+
+  // Live Hearth subscription: per-room WS to the Hearth DO. Hello carries
+  // the day's NPCs (with backstory/objective/motive); agent-thinking deltas
+  // tell us who's mid-thought; agent-decided fills the moments feed below
+  // the cast list. Card plays go over this socket too.
+  // Must be called unconditionally at top level — moving this inside the
+  // IIFE below (where viewNode branches per phase) would break the Rules
+  // of Hooks when the player transitions setup → playing.
+  // Phase 4 — if the URL carries `?inv=<token>`, join as observer on the
+  // DO with that invite. Captured once at mount so later navigations don't
+  // accidentally re-connect in a different role.
+  const urlInviteToken = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      return new URL(window.location.href).searchParams.get("inv");
+    } catch {
+      return null;
+    }
+  }, []);
+  const hearth = useHearth({
+    enabled: state.phase === "playing",
+    inviteToken: urlInviteToken,
+  });
+
+  // Project Hearth's hello into engine state. The hello carries the room's
+  // tilemap, anchors, palette, and the day's NPC roster — Hearth is the
+  // source of truth for all of it. Each unique scene id only projects once
+  // per session so re-renders don't reset character positions / motion.
+  const projectedSceneIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const hello = hearth.hello;
+    if (!hello) return;
+    const wireSceneId = hello.scene?.id ?? null;
+    if (!wireSceneId) return;
+    if (projectedSceneIdRef.current === wireSceneId) return;
+    if (!hello.scene.tilemap || hello.scene.tilemap.length === 0) return;
+    const scene = sceneFromHello(hello);
+    const characters = charactersFromHello(hello, scene);
+    const live = stateRef.current;
+    applyScene(live, scene);
+    if (characters.length > 0) live.characters = characters;
+    projectedSceneIdRef.current = wireSceneId;
+    setState({ ...live });
+  }, [hearth.hello]);
+
+  // Mid-day spawns: incrementally append a Character for each newly
+  // arrived NPC without resetting existing characters' motion state.
+  useEffect(() => {
+    if (hearth.spawnedNpcs.length === 0) return;
+    const live = stateRef.current;
+    if (!live.scene) return;
+    let added = false;
+    for (const ev of hearth.spawnedNpcs) {
+      const id = npcCharId(ev.npc.name);
+      if (live.characters.some((c) => c.id === id)) continue;
+      live.characters = [...live.characters, characterFromNpc(ev.npc, live.scene)];
+      added = true;
+    }
+    if (added) setState({ ...live });
+  }, [hearth.spawnedNpcs]);
 
   const viewNode: React.ReactNode = (() => {
   if (state.phase === "setup") {
@@ -1251,47 +1224,15 @@ export function RPG() {
         </div>
       )}
 
-      {/* Top chrome */}
-      <div className="rp-top">
-        <div className="rp-top-left">
-          <button
-            type="button"
-            className="rp-icon-btn"
-            onClick={onBackToMenu}
-            title="Back to the building"
-            aria-label="Back to the building"
-          >
-            ‹
-          </button>
-        </div>
-        <div className="rp-top-center">
-          <h1 className="rp-floor-title">FLOOR {state.floorIndex >= 0 ? state.floorIndex + 1 : ""}</h1>
-          <div className="rp-scene-name">{state.scene.name}</div>
-        </div>
-        <div className="rp-top-right">
-          <div className="rp-clock" aria-label={`${clockFace}, ${clockLabel}`}>
-            <span className="rp-clock-face">{clockFace}</span>
-            <span className="rp-clock-label">{clockLabel}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Tension rail */}
-      <div className="rp-tension-rail" aria-label={`Tension ${Math.round(state.tension)}`}>
-        <span className="rp-tension-label">TENSION</span>
-        <div className="rp-tension-track">
-          <div className={`rp-tension-fill ${spent ? "is-spent" : ""}`} style={{ width: `${tensionPct}%` }} />
-        </div>
-        <span className="rp-tension-label" style={{ minWidth: 28, textAlign: "right" }}>{Math.round(state.tension)}</span>
-      </div>
-
       {state.stakes && (
         <div className="rp-stakes-strip" role="note">
           <span className="tag">THE STAKES</span>{state.stakes}
         </div>
       )}
 
-      {/* Stage (canvas) — sized by ResizeObserver to fill the frame. */}
+      {/* Stage (canvas) — sized by ResizeObserver to fill the frame.
+          Title/clock/tension float inside the frame as HUD overlays so the
+          canvas can go truly edge-to-edge. */}
       <div className="rp-stage">
         <div className="rp-canvas-frame">
           <canvas
@@ -1300,53 +1241,31 @@ export function RPG() {
             onClick={state.pending ? onSkipLine : undefined}
             title={state.pending ? "Click to skip this line" : undefined}
           />
+          <div className="rp-hud-top" aria-hidden={false}>
+            <div className="rp-top-center">
+              <h1 className="rp-floor-title">FLOOR {state.floorIndex >= 0 ? state.floorIndex + 1 : ""}</h1>
+              <div className="rp-scene-name">
+                {hearth.hello
+                  ? `${hearth.hello.dailyPlan.dayOfWeek}, ${String(hearth.hello.clock.gameHour).padStart(2, "0")}:00 · ${hearth.hello.scene.location} (${hearth.hello.scene.timeOfDay})`
+                  : state.scene.name}
+              </div>
+            </div>
+            <div className="rp-top-right">
+              <div className="rp-clock" aria-label={`${clockFace}, ${clockLabel}`}>
+                <span className="rp-clock-face">{clockFace}</span>
+                <span className="rp-clock-label">{clockLabel}</span>
+              </div>
+            </div>
+          </div>
+          <div className="rp-hud-tension" aria-label={`Tension ${Math.round(state.tension)}`}>
+            <span className="rp-tension-label">TENSION</span>
+            <div className="rp-tension-track">
+              <div className={`rp-tension-fill ${spent ? "is-spent" : ""}`} style={{ width: `${tensionPct}%` }} />
+            </div>
+            <span className="rp-tension-label" style={{ minWidth: 28, textAlign: "right" }}>{Math.round(state.tension)}</span>
+          </div>
         </div>
 
-        {/* Desktop cast drawer (left) — hidden on mobile via media query */}
-        <aside className="rp-drawer rp-drawer-left" aria-label="Cast">
-          <div className="rp-drawer-head">
-            <span>THE CAST</span>
-            <span>{liveCast.length}</span>
-          </div>
-          {liveCast.map((c) => (
-            <div key={c.id} className="rp-cast-card">
-              <div className="rp-cast-head">
-                <span className="rp-cast-dot" style={{ background: c.palette.cloak }} />
-                <span className="rp-cast-name">{c.name}</span>
-                <span className="rp-cast-mood">· {c.mood}</span>
-              </div>
-              {c.description && <div className="rp-cast-desc">{c.description}</div>}
-              {c.inventory.length > 0 && (
-                <div className="rp-cast-inv">carries: {c.inventory.join(", ")}</div>
-              )}
-              {c.objective && <div className="rp-cast-desc" style={{ color: "var(--ink-dim)", fontStyle: "italic" }}>wants: {c.objective}</div>}
-            </div>
-          ))}
-        </aside>
-
-        {/* Desktop / mobile log panel */}
-        {showLog && (
-          <aside className="rp-log-panel" aria-label="Story log">
-            <div className="rp-log-handle" />
-            <div className="rp-log-head">
-              <span>STORY LOG · {state.log.length}</span>
-              <button type="button" onClick={() => setShowLog(false)} style={{ background: "none", border: "none", color: "var(--ink-dim)", cursor: "pointer", fontFamily: "var(--mono)", fontSize: 10 }}>× CLOSE</button>
-            </div>
-            {state.log.length === 0 ? (
-              <div className="rp-log-empty">Nothing has happened yet.</div>
-            ) : (
-              <ul className="rp-log-list">
-                {[...state.log].reverse().map((l) => (
-                  <li key={l.id} className={`rp-log-line kind-${l.kind}`}>
-                    {l.kind === "action" && <span className="rp-log-tag">action</span>}
-                    {l.kind === "ambient" && <span className="rp-log-tag dim">ambient</span>}
-                    {l.text}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </aside>
-        )}
       </div>
 
       {/* Live region for screen readers */}
@@ -1370,109 +1289,47 @@ export function RPG() {
   // flickers or remounts when you enter / leave a floor.
   const inPlay = state.phase === "playing";
   const spentNow = state.phase === "playing" && state.tension >= 100;
+  const liveCast = state.characters.filter((c) => !c.transient && !c.dead);
   return (
     <>
       {viewNode}
 
-      <div className="rp-dock">
-        {inPlay ? (
-          <>
-            <form
-              className="rp-dock-directive"
-              onSubmit={(e) => { e.preventDefault(); void onSubmitDirective(); }}
-            >
-              <span
-                className={`rp-directive-pulse ${narratorThinking ? "" : busy ? "is-off" : ""}`}
-                aria-hidden="true"
-              />
-              <label className="visually-hidden" htmlFor="rp-directive-input">What happens next</label>
-              <input
-                id="rp-directive-input"
-                type="text"
-                className="rp-directive-input"
-                placeholder={
-                  narratorThinking
-                    ? "director is composing…"
-                    : busy
-                      ? "the floor is unfolding…"
-                      : "What happens next?"
-                }
-                value={directive}
-                onChange={(e) => setDirective(e.target.value)}
-                disabled={busy}
-                spellCheck={false}
-                autoComplete="off"
-              />
-              <button
-                type="submit"
-                className="rp-directive-send"
-                disabled={busy || !directive.trim()}
-                aria-label="Submit"
-              >
-                ↑
-              </button>
-            </form>
-            <div className="rp-dock-row">
-              <button
-                type="button"
-                className="rp-dock-menu"
-                onClick={() => setActiveSheet("menu")}
-                title="Menu"
-                aria-label="Menu"
-              >
-                ☰
-              </button>
-              <div className="rp-dock-tape" role="group" aria-label="Playback">
-                <button type="button" className="rp-icon-btn" onClick={onRewind} disabled={state.history.length === 0 || spentNow} title={state.history.length === 0 ? "Nothing to rewind" : `Rewind (${state.history.length})`} aria-label="Rewind">⟲</button>
-                <button type="button" className={`rp-icon-btn ${!state.paused ? "is-active" : ""}`} onClick={onTogglePause} title={state.paused ? "Play" : "Pause"} aria-label={state.paused ? "Play" : "Pause"}>{state.paused ? "▶" : "❚❚"}</button>
-                <button type="button" className="rp-icon-btn" onClick={onSkipLine} disabled={!state.pending} title="Skip line" aria-label="Skip line">⏭</button>
-                <button type="button" className="rp-icon-btn" onClick={onToggleSpeed} title={`Reading speed ${state.narrationSpeed >= 2 ? "2x" : "1x"}`} aria-pressed={state.narrationSpeed >= 2}>{state.narrationSpeed >= 2 ? "2×" : "1×"}</button>
-                <button type="button" className="rp-icon-btn" onClick={() => setShowLog((v) => !v)} title={showLog ? "Hide log" : "Show log"} aria-pressed={showLog}>☰</button>
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="rp-dock-tabs">
-            <button
-              type="button"
-              className="rp-dock-tab"
-              aria-pressed={activeSheet === "profile"}
-              onClick={() => setActiveSheet(activeSheet === "profile" ? null : "profile")}
-            >
-              <span className="rp-dock-tab-glyph">◉</span>
-              <span className="rp-dock-tab-label">PROFILE</span>
-            </button>
-            <button
-              type="button"
-              className="rp-dock-tab"
-              aria-pressed={activeSheet === "season"}
-              onClick={() => setActiveSheet(activeSheet === "season" ? null : "season")}
-            >
-              <span className="rp-dock-tab-glyph">☼</span>
-              <span className="rp-dock-tab-label">SEASON</span>
-            </button>
-            <button
-              type="button"
-              className="rp-dock-tab"
-              aria-pressed={activeSheet === "settings"}
-              onClick={() => setActiveSheet(activeSheet === "settings" ? null : "settings")}
-            >
-              <span className="rp-dock-tab-glyph">⚙</span>
-              <span className="rp-dock-tab-label">SETTINGS</span>
-            </button>
-            <button
-              type="button"
-              className="rp-dock-tab"
-              aria-pressed
-              onClick={() => setActiveSheet(null)}
-              title="You're on the building view"
-            >
-              <span className="rp-dock-tab-glyph">⌂</span>
-              <span className="rp-dock-tab-label">BUILDING</span>
-            </button>
-          </div>
-        )}
-      </div>
+      <StageConsole
+        hello={hearth.hello}
+        status={hearth.status}
+        role={hearth.hello?.role ?? "owner"}
+        peers={hearth.peers}
+        selfPeerId={hearth.hello?.peerId ?? ""}
+        health={hearth.health}
+        agents={hearth.agents}
+        moments={hearth.moments}
+        inviteToken={hearth.inviteToken}
+        difficulty={hearth.difficulty}
+        missedEvents={hearth.missedEvents}
+        npcsByAgentId={hearth.npcsByAgentId}
+        liveCast={liveCast}
+        inPlay={inPlay}
+        directive={directive}
+        setDirective={setDirective}
+        onSubmitDirective={() => { void onSubmitDirective(); }}
+        narratorThinking={narratorThinking}
+        busy={busy}
+        paused={state.paused}
+        narrationSpeed={state.narrationSpeed}
+        historyCount={state.history.length}
+        pending={!!state.pending}
+        spent={spentNow}
+        onTogglePause={onTogglePause}
+        onRewind={onRewind}
+        onSkipLine={onSkipLine}
+        onToggleSpeed={onToggleSpeed}
+        activeSheet={activeSheet}
+        setActiveSheet={setActiveSheet}
+        onSetDifficulty={(d) => { hearth.setDifficulty(d); }}
+        onRotateInvite={() => { hearth.rotateInvite(); }}
+        onDismissMissed={() => hearth.clearMissedEvents()}
+        onBackToMenu={onBackToMenu}
+      />
 
       {activeSheet && (
         <Sheet

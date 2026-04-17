@@ -1221,3 +1221,284 @@ button {
   font-size: 13px;
   color: #6f6f76;
 }
+
+/* ─── Today's plan overlay ────────────────────────────────────────────── */
+
+.crumb-button {
+  cursor: pointer;
+  border: none;
+  padding: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  border-bottom: 1px dashed transparent;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.crumb-button:hover,
+.crumb-button:focus-visible {
+  color: var(--prose-cream);
+  border-bottom-color: var(--ui-deep-muted);
+  outline: none;
+}
+
+.plan-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 9, 16, 0.78);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 64px 24px;
+  z-index: 60;
+  overflow-y: auto;
+  animation: plan-fade 120ms ease-out;
+}
+
+@keyframes plan-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.plan-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  width: 100%;
+  max-width: 720px;
+  color: var(--prose-cream);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+.plan-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+
+.plan-eyebrow {
+  font-size: 11px;
+  letter-spacing: 1.6px;
+  color: var(--ui-deep-muted);
+  text-transform: uppercase;
+}
+
+.plan-title {
+  margin: 4px 0 0;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  color: var(--prose-cream);
+}
+
+.plan-close {
+  font-size: 24px;
+  line-height: 1;
+  color: var(--ui-muted);
+  padding: 4px 8px;
+  transition: color 120ms ease;
+}
+.plan-close:hover { color: var(--prose-cream); }
+
+.plan-empty {
+  padding: 32px 24px;
+  color: var(--ui-muted);
+  font-style: italic;
+}
+
+.plan-body {
+  padding: 20px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.plan-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plan-label {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--ui-deep-muted);
+}
+
+.plan-objective {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--amber);
+}
+
+.plan-seed {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ui-muted);
+  font-style: italic;
+}
+
+.plan-npc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.plan-npc {
+  border: 1px solid var(--rule-soft);
+  background: var(--bg-rail);
+  padding: 14px 16px;
+}
+
+.plan-npc-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.plan-npc-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ui-muted);
+  border: 1px solid var(--rule);
+  align-self: center;
+}
+
+.plan-npc-warm .plan-npc-swatch { background: #c98a4d; }
+.plan-npc-cool .plan-npc-swatch { background: #5b8ba8; }
+.plan-npc-moss .plan-npc-swatch { background: #6b8e5b; }
+.plan-npc-rust .plan-npc-swatch { background: #a85a3c; }
+.plan-npc-ash  .plan-npc-swatch { background: #8a8a8a; }
+.plan-npc-bone .plan-npc-swatch { background: #d8cfb8; }
+
+.plan-npc-name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--prose-cream);
+}
+
+.plan-npc-palette {
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--ui-deep-muted);
+}
+
+.plan-npc-backstory {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--prose-cream);
+}
+
+.plan-npc-fields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.plan-npc-fields > div {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.plan-npc-fields dt {
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--ui-deep-muted);
+}
+
+.plan-npc-fields dd {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--prose-cream);
+}
+
+.plan-npc-schedule {
+  border-top: 1px solid var(--rule-soft);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+.plan-npc-schedule summary {
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--ui-deep-muted);
+  list-style: none;
+}
+.plan-npc-schedule summary::-webkit-details-marker { display: none; }
+.plan-npc-schedule summary::before {
+  content: "▸ ";
+  color: var(--ui-deep-muted);
+}
+.plan-npc-schedule[open] summary::before {
+  content: "▾ ";
+}
+
+.plan-npc-schedule ol {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--ui-muted);
+}
+
+.plan-slot {
+  display: grid;
+  grid-template-columns: 56px 1fr auto;
+  gap: 10px;
+  padding: 3px 6px;
+  border-radius: 2px;
+}
+
+.plan-slot-now {
+  background: rgba(212, 168, 87, 0.08);
+  color: var(--amber);
+}
+
+.plan-slot-hour {
+  font-family: "JetBrains Mono", "SF Mono", monospace;
+  font-size: 11px;
+  color: var(--ui-deep-muted);
+}
+
+.plan-slot-now .plan-slot-hour { color: var(--amber); }
+
+.plan-slot-mood {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--ui-deep-muted);
+}
+
+.plan-footnote {
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--ui-deep-muted);
+  border-top: 1px solid var(--rule-soft);
+  padding-top: 14px;
+}

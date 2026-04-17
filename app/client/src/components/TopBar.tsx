@@ -4,6 +4,7 @@ import type { ConnectionStatus } from "../lib/ws";
 
 interface Props {
   status: ConnectionStatus;
+  onOpenPlan: () => void;
 }
 
 /**
@@ -13,7 +14,7 @@ interface Props {
  *
  * TODO: run/pack name comes from a future pack-level field; hardcoded.
  */
-export function TopBar({ status }: Props) {
+export function TopBar({ status, onOpenPlan }: Props) {
   const scene = useAugur((s) => s.scene);
   const dailyPlan = useAugur((s) => s.dailyPlan);
   const clock = useAugur((s) => s.clock);
@@ -40,7 +41,15 @@ export function TopBar({ status }: Props) {
           {"\u2039"}
         </span>
         <nav className="breadcrumb" aria-label="Breadcrumb">
-          <span className="crumb crumb-pack">{packName}</span>
+          <button
+            type="button"
+            className="crumb crumb-pack crumb-button"
+            onClick={onOpenPlan}
+            title="Today's plan"
+            aria-label="Open today's plan"
+          >
+            {packName}
+          </button>
           <span className="crumb-sep crumb-pack">·</span>
           <span className="crumb crumb-scene-num">{sceneNum}</span>
           <span className="crumb-sep crumb-scene-num">·</span>

@@ -10,12 +10,14 @@ import { ClawHandDrawer } from "./components/ClawHandDrawer";
 import { KickedScreen } from "./components/KickedScreen";
 import { RunEndOverlay } from "./components/RunEndOverlay";
 import { SoftWarningBanner } from "./components/SoftWarningBanner";
+import { TodaysPlanPanel } from "./components/TodaysPlanPanel";
 
 export function App() {
   const apply = useAugur((s) => s.applyServer);
   const kicked = useAugur((s) => s.kicked);
   const errorMessage = useAugur((s) => s.errorMessage);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const [planOpen, setPlanOpen] = useState(false);
 
   const ws = useMemo(() => createWSClient(), []);
 
@@ -32,7 +34,7 @@ export function App() {
 
   return (
     <div className="reactor">
-      <TopBar status={status} />
+      <TopBar status={status} onOpenPlan={() => setPlanOpen(true)} />
       <div className="rule-row" aria-hidden />
       <div className="body">
         <ClawRail />
@@ -48,6 +50,7 @@ export function App() {
         onPlay={(cardId) => ws.send({ type: "play", cardId })}
       />
       <RunEndOverlay />
+      <TodaysPlanPanel open={planOpen} onClose={() => setPlanOpen(false)} />
       {kicked && <KickedScreen />}
     </div>
   );

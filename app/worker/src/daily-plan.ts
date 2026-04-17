@@ -26,7 +26,9 @@ export function dayOfWeekName(dateIso: string): string {
 const OPENING_HOUR = 7;
 const CLOSING_HOUR = 22;
 
-const DAILY_PLAN_SYSTEM = `You author one day inside a single small fictional room — a quiet inn / tavern / lodging at the edge of a kingdom that no longer keeps its records.
+const DAILY_PLAN_SYSTEM = `You author one day inside a single small fictional room.
+
+The room's premise is given to you in the user message. Honor it — the residents, their objectives, the player objective, and the seed must all sit inside that premise.
 
 Output is a plan for that day: a short player objective, 2 or 3 residents with hour-by-hour schedules, and a one-line flavor seed.
 
@@ -223,9 +225,19 @@ interface AiBinding {
 export async function generateDailyPlan(
   env: { AI: AiBinding },
   dateIso: string,
+  roomPrompt?: string,
+  anchors?: string[],
 ): Promise<DailyPlan> {
   const dayOfWeek = dayOfWeekName(dateIso);
+  const promptLine = roomPrompt && roomPrompt.trim()
+    ? `Room premise: ${roomPrompt.trim()}`
+    : `Room premise: a quiet inn / tavern / lodging at the edge of a kingdom.`;
+  const anchorsLine = anchors && anchors.length > 0
+    ? `Named positions in the room (residents may stand at these): ${anchors.join(", ")}.`
+    : `Named positions in the room: door, fire, bar, table, window, stairs.`;
   const userPrompt = [
+    promptLine,
+    anchorsLine,
     `Date: ${dateIso} (${dayOfWeek}).`,
     `Open hours: ${OPENING_HOUR}:00 — ${CLOSING_HOUR}:00.`,
     `Generate today's plan. Return STRICT JSON only.`,

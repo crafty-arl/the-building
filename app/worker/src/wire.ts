@@ -48,11 +48,18 @@ export function treeToWire(tree: SessionTree): TreeSnapshot {
 }
 
 export function sceneToWire(scene: Scene): SceneWire {
-  return {
+  const wire: SceneWire = {
     id: scene.id,
     location: scene.location,
     timeOfDay: scene.timeOfDay,
     moods: scene.moods,
     npcs: scene.npcs,
+    anchors: scene.anchors,
   };
+  if (scene.tilemap) wire.tilemap = scene.tilemap;
+  if (typeof scene.floorY === "number") wire.floorY = scene.floorY;
+  if (scene.anchorCoords) wire.anchorCoords = scene.anchorCoords;
+  if (scene.palette) wire.palette = scene.palette;
+  if (scene.source) wire.source = scene.source;
+  return wire;
 }
