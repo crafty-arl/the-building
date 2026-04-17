@@ -71,6 +71,7 @@ const STORAGE_FOOTSTEPS = "footsteps";
 const STORAGE_USERID = "userId";
 const STORAGE_ROOMID = "roomId";
 const STORAGE_ROOM_PROMPT = "roomPrompt";
+const STORAGE_INHERITED_MEMORY = "inheritedMemory";
 const STORAGE_ANCHORS = "anchors";
 const STORAGE_DAILY_PLAN = "dailyPlan";
 const STORAGE_CLOCK = "clock";
@@ -113,6 +114,7 @@ export class Hearth implements DurableObject {
   private userId = "anonymous";
   private roomId = "default";
   private roomPrompt = "";
+  private inheritedMemory = "";
   private anchors: string[] = [];
   private dailyPlan: RoomPlan | null = null;
   private clock: RunClock | null = null;
@@ -144,6 +146,8 @@ export class Hearth implements DurableObject {
       (await this.state.storage.get<string>(STORAGE_ROOMID)) ?? "default";
     this.roomPrompt =
       (await this.state.storage.get<string>(STORAGE_ROOM_PROMPT)) ?? "";
+    this.inheritedMemory =
+      (await this.state.storage.get<string>(STORAGE_INHERITED_MEMORY)) ?? "";
     this.anchors =
       (await this.state.storage.get<string[]>(STORAGE_ANCHORS)) ?? [];
     this.dailyPlan =
@@ -175,6 +179,7 @@ export class Hearth implements DurableObject {
     await this.state.storage.put(STORAGE_USERID, this.userId);
     await this.state.storage.put(STORAGE_ROOMID, this.roomId);
     await this.state.storage.put(STORAGE_ROOM_PROMPT, this.roomPrompt);
+    await this.state.storage.put(STORAGE_INHERITED_MEMORY, this.inheritedMemory);
     await this.state.storage.put(STORAGE_ANCHORS, this.anchors);
     if (this.dailyPlan) await this.state.storage.put(STORAGE_DAILY_PLAN, this.dailyPlan);
     if (this.clock) await this.state.storage.put(STORAGE_CLOCK, this.clock);
@@ -209,6 +214,11 @@ export class Hearth implements DurableObject {
     // Last write wins — re-sending after a room edit updates the DO.
     const promptParam = url.searchParams.get("prompt");
     if (promptParam !== null) this.roomPrompt = promptParam;
+    // Building-wide memory (previous floors' story + surviving roster +
+    // ghosts). Last write wins so the client can refresh continuity when
+    // the building evolves.
+    const memoryParam = url.searchParams.get("memory");
+    if (memoryParam !== null) this.inheritedMemory = memoryParam;
     const anchorsParam = url.searchParams.get("anchors");
     if (anchorsParam !== null) {
       this.anchors = anchorsParam
@@ -353,6 +363,7 @@ export class Hearth implements DurableObject {
         this.env,
         today,
         this.roomPrompt,
+        this.inheritedMemory,
       );
       this.planGeneratedAt = Date.now();
       // The plan now owns the anchor list — keep STORAGE_ANCHORS in sync so
@@ -427,6 +438,7 @@ export class Hearth implements DurableObject {
         this.env,
         today,
         this.roomPrompt,
+        this.inheritedMemory,
       );
       this.planGeneratedAt = Date.now();
       // The plan now owns the anchor list — keep STORAGE_ANCHORS in sync so

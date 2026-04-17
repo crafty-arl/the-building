@@ -150,14 +150,19 @@ export function useHearth(opts: { enabled: boolean; roomId: string | null; invit
       // authors the room's geometry itself (Phase 6E.2+) and broadcasts the
       // anchor names back in `hello`. The client's job is to render, not
       // to ship a stale local anchor list upstream.
+      // `memory` carries building-wide continuity (previous floors' summaries,
+      // ghosts, surviving roster) so Hearth can author the new floor as the
+      // next chapter rather than a standalone scene.
       const room = loadRoomById(roomId, Date.now());
       const prompt = (room?.roomPrompt ?? "").trim();
+      const memory = (room?.inheritedMemory ?? "").trim();
 
       const inv = opts.inviteToken?.trim() || "";
       const url =
         `${WS_BASE}/api/session?userId=${encodeURIComponent(userId)}` +
         `&roomId=${encodeURIComponent(roomId)}` +
         (prompt ? `&prompt=${encodeURIComponent(prompt)}` : "") +
+        (memory ? `&memory=${encodeURIComponent(memory)}` : "") +
         (inv ? `&inv=${encodeURIComponent(inv)}` : "");
 
       setStatus("connecting");

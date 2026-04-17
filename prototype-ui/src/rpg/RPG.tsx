@@ -484,12 +484,15 @@ export function RPG() {
         setBuilding(bld);
         void saveBuilding(bld);
       }
-      // Allocate room identity. The room's geometry, anchors, palette, and
+      // Allocate room identity. Start from a fresh state — any prior floor's
+      // scene, characters, tension, and flags must not leak into the new room
+      // (otherwise the player sees the previous floor until Hearth's hello
+      // projects the new scene). The room's geometry, anchors, palette, and
       // resident NPCs are NOT authored here — Hearth authors them and the
       // hello message projects them into state via projectHelloIntoState
       // below. Until hello arrives, the canvas shows the placeholder scene
       // from initialState (SCENES.cabin) and a "waking the room…" toast.
-      const live = stateRef.current;
+      const live = initialState(now);
       live.roomId = newRoomId();
       live.roomPrompt = prompt;
       live.buildingId = bld.id;
@@ -503,6 +506,18 @@ export function RPG() {
       ).length;
       live.floorIndex = bld.floors.length + activeForBld;
       live.inheritedMemory = buildInheritedMemory(bld);
+      live.simStartedAt = now;
+      live.lastAmbient = now;
+      live.phase = "playing";
+      live.pending = {
+        full: "Waking the room…",
+        shown: 0,
+        sealedAt: now,
+        kind: "narration",
+      };
+      live.roomContext = prompt;
+      stateRef.current = live;
+      projectedSceneIdRef.current = null;
       bld.activeRoomId = live.roomId;
       bld.lastPlayedAt = Date.now();
       ensureProgressState(bld);
@@ -516,19 +531,9 @@ export function RPG() {
       const done = evaluateObjectives(bld);
       for (const o of done) flashToast(`+${o.reward} · ${o.label}`);
       void saveBuilding(bld);
-      // Stay on the card-picking page while the room loads. Phase only
-      // flips to "playing" in the hello-projection effect once the scene
-      // is actually renderable (tilemap + cast applied). simStartedAt is
-      // reset at that flip so the in-floor clock starts when the user
-      // really enters the room, not when they clicked IGNITE.
-      live.simStartedAt = now;
-      live.lastAmbient = now;
-      live.roomContext = prompt;
-      live.roomItems = [];
-      live.stakes = "";
-      // Persist immediately so useHearth's next connect can loadRoomById()
-      // and forward the prompt — otherwise the WS races the ~3s autosave
-      // tick and the new Hearth DO boots with an empty prompt.
+      // Persist the new room immediately so useHearth reads the new roomId
+      // from CURRENT_KEY on its first connect attempt (otherwise it races
+      // the tick loop's autosave and can connect with a stale roomId).
       saveState(live);
       setSelectedIngredients([]);
       setSelectedSurvivors([]);
