@@ -293,6 +293,18 @@ export function RPG() {
   // follow target so the camera prefers whoever is "active" right now.
   const lastActiveRef = useRef<string | null>(null);
   const pausedAtRef = useRef<number | null>(null);
+  // Screen-space director/narrator banner driven by Hearth moments from
+  // agentId === "director". Rendered in the canvas draw loop as an overlay,
+  // not part of the engine's GameState.
+  const directorBeatRef = useRef<{
+    text: string;
+    kind: string;
+    reason: string;
+    until: number;
+  } | null>(null);
+  // Tracks how many hearth.moments we've already mirrored onto character
+  // bubbles so each moment fires exactly once on the canvas.
+  const momentsMirroredRef = useRef(0);
 
   useEffect(() => {
     let raf = 0;
@@ -466,6 +478,7 @@ export function RPG() {
         camWorldY,
         zoom,
       );
+      drawDirectorBeat(ctx, directorBeatRef.current, now, cssW);
 
       raf = requestAnimationFrame(draw);
     };
@@ -770,6 +783,62 @@ export function RPG() {
     }
     if (added) setState({ ...live });
   }, [hearth.spawnedNpcs]);
+
+  // Mirror Hearth moments onto the canvas. "say" → gold dialog bubble above
+  // the speaker; "do" → bronze action caption; director moments → a
+  // narrator banner across the top of the canvas. Without this bridge the
+  // log pane was the only place these beats appeared.
+  useEffect(() => {
+    const moms = hearth.moments;
+    if (moms.length === momentsMirroredRef.current) return;
+    const live = stateRef.current;
+    const now = performance.now();
+    const fresh = moms.slice(momentsMirroredRef.current);
+    momentsMirroredRef.current = moms.length;
+    for (const m of fresh) {
+      const action = m.action;
+      if (!action) continue;
+      const text = (action.text ?? "").trim();
+      if (m.agentId === "director") {
+        if (!text) continue;
+        directorBeatRef.current = {
+          text,
+          kind: action.type || "beat",
+          reason: m.reason,
+          until: now + 12000,
+        };
+        continue;
+      }
+      if (!text) continue;
+      const c = live.characters.find((ch) => ch.id === m.agentId);
+      if (!c) continue;
+      if (action.type === "say") {
+        c.speech = { text, kind: "say", until: now + 9000 };
+      } else if (action.type === "do") {
+        c.speech = { text, kind: "do", until: now + 6500 };
+      }
+    }
+  }, [hearth.moments]);
+
+  // Thinking bubbles: while an agent is mid-stream, float a dashed thought
+  // cloud above them. Cleared the moment their `thinking` buffer empties
+  // (which useHearth does on `agent-decided`), leaving room for the real
+  // say/do bubble that follows.
+  useEffect(() => {
+    const live = stateRef.current;
+    const now = performance.now();
+    for (const c of live.characters) {
+      const ag = hearth.agents[c.id];
+      const isThinking = !!ag && ag.thinking.length > 0;
+      if (isThinking) {
+        if (!c.speech || c.speech.kind === "think") {
+          c.speech = { text: "", kind: "think", until: now + 2000 };
+        }
+      } else if (c.speech && c.speech.kind === "think") {
+        c.speech = null;
+      }
+    }
+  }, [hearth.agents]);
 
   const viewNode: React.ReactNode = (() => {
   if (state.phase === "setup") {
@@ -2809,7 +2878,128 @@ function drawCharacter(
   // Emote + speech float further above the head.
   const inventoryOffset = c.inventory.length > 0 ? 13 : 0;
   if (c.emote) drawEmote(ctx, feetX, nameY - 14 - inventoryOffset, c.emote.kind, now);
-  if (c.speech) drawSpeech(ctx, feetX, nameY - 24 - inventoryOffset, c.speech.text);
+  if (c.speech) {
+    const bubbleY = nameY - 24 - inventoryOffset;
+    const kind = c.speech.kind ?? "say";
+    if (kind === "do") drawActionBubble(ctx, feetX, bubbleY, c.speech.text);
+    else if (kind === "think") drawThinkBubble(ctx, feetX, bubbleY, now);
+    else drawSpeech(ctx, feetX, bubbleY, c.speech.text);
+  }
+}
+
+// Bronze action caption. Signals a "do" — what the character is physically
+// doing, as italicized stage direction. Distinct from the gold "say" bubble
+// so the two kinds of log lines read differently on the canvas.
+function drawActionBubble(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  text: string,
+) {
+  const trim = text.length > 60 ? text.slice(0, 58) + "…" : text;
+  ctx.font = "italic 10px ui-monospace, SF Mono, monospace";
+  const metrics = ctx.measureText(trim);
+  const innerW = Math.ceil(metrics.width) + 12;
+  const innerH = 14;
+  const w = innerW + 4;
+  const h = innerH + 4;
+  const x = Math.max(4, Math.min(ctx.canvas.width - w - 4, cx - w / 2));
+  const y = Math.max(4, cy - h);
+  ctx.fillStyle = "#7a4f2a";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = "#1a1409";
+  ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = "rgba(214, 122, 74, 0.18)";
+  ctx.fillRect(x + 2, y + 2, innerW, innerH);
+  ctx.fillStyle = "#d67a4a";
+  ctx.textBaseline = "top";
+  ctx.fillText(trim, x + 7, y + 4);
+  ctx.fillStyle = "#7a4f2a";
+  ctx.fillRect(cx - 2, y + h, 4, 1);
+  ctx.fillRect(cx - 1, y + h + 1, 2, 1);
+}
+
+// Dashed thought cloud with a trailing dot tail. Shown while an agent is
+// mid-stream so observers can see "they're thinking" on the canvas itself,
+// not just in the cast panel.
+function drawThinkBubble(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  now: number,
+) {
+  const phase = Math.floor(now / 220) % 3;
+  const dots = phase === 0 ? "·  " : phase === 1 ? "· · " : "· · ·";
+  ctx.font = "10px ui-monospace, SF Mono, monospace";
+  const innerW = 26;
+  const innerH = 14;
+  const w = innerW + 4;
+  const h = innerH + 4;
+  const x = Math.max(4, Math.min(ctx.canvas.width - w - 4, cx - w / 2));
+  const y = Math.max(4, cy - h);
+  ctx.fillStyle = "rgba(20,24,31,0.88)";
+  ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.save();
+  ctx.strokeStyle = "#6a5a48";
+  ctx.setLineDash([2, 2]);
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.restore();
+  ctx.fillStyle = "#9ca3af";
+  ctx.textBaseline = "top";
+  ctx.textAlign = "center";
+  ctx.fillText(dots, x + w / 2, y + 4);
+  ctx.textAlign = "start";
+  ctx.fillStyle = "#6a5a48";
+  ctx.fillRect(cx - 1, y + h + 1, 2, 2);
+  ctx.fillRect(cx - 2, y + h + 5, 3, 3);
+}
+
+// Top-of-canvas director/narrator banner. Director moments don't belong on
+// any one agent (the director has no body), so they get their own strip.
+function drawDirectorBeat(
+  ctx: CanvasRenderingContext2D,
+  beat: { text: string; kind: string; reason: string; until: number } | null,
+  now: number,
+  cssW: number,
+) {
+  if (!beat) return;
+  if (beat.until <= now) return;
+  const maxW = Math.min(520, cssW - 32);
+  ctx.font = "12px ui-monospace, SF Mono, monospace";
+  ctx.textBaseline = "top";
+  const lines = wrapText(ctx, beat.text, maxW - 24);
+  const lineH = 16;
+  const padX = 12;
+  const padY = 10;
+  const labelH = 14;
+  const w = maxW;
+  const h = padY * 2 + labelH + lines.length * lineH;
+  const x = Math.floor((cssW - w) / 2);
+  const y = 58;
+  // Fade the last second so it doesn't vanish abruptly.
+  const remain = beat.until - now;
+  const alpha = remain < 1000 ? Math.max(0, remain) / 1000 : 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "#e8c86a";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = "#12100a";
+  ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = "rgba(232,200,106,0.07)";
+  ctx.fillRect(x + 2, y + 2, w - 4, h - 4);
+  ctx.fillStyle = "#c89a3a";
+  ctx.font = "bold 10px ui-monospace, SF Mono, monospace";
+  ctx.fillText(
+    `THE DIRECTOR · ${beat.kind.toUpperCase()}`,
+    x + padX,
+    y + padY,
+  );
+  ctx.fillStyle = "#f5f0e8";
+  ctx.font = "12px ui-monospace, SF Mono, monospace";
+  lines.forEach((line, i) => {
+    ctx.fillText(line, x + padX, y + padY + labelH + i * lineH);
+  });
+  ctx.restore();
 }
 
 function drawSpeech(ctx: CanvasRenderingContext2D, cx: number, cy: number, text: string) {

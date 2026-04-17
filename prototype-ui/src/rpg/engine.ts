@@ -26,7 +26,7 @@ export interface Character {
   goal: string | null;
   palette: { body: string; cloak: string; accent: string };
   emote: { kind: EmoteKind; until: number } | null;
-  speech: { text: string; until: number } | null;
+  speech: { text: string; until: number; kind?: "say" | "do" | "think" } | null;
   mood: Mood;
   schedule: ScheduleSlot[];
   scheduleAnchor: string | null;
