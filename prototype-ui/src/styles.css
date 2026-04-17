@@ -1492,8 +1492,12 @@ html, body, #root {
   display: block;
   width: 100%;
   height: 100%;
+  cursor: grab;
+  touch-action: none;
 }
 .rp-canvas.is-skippable { cursor: pointer; }
+.rp-canvas.is-dragging,
+.rp-canvas.is-skippable.is-dragging { cursor: grabbing; }
 
 /* Side drawers for desktop (cast / log). Hidden on mobile. */
 .rp-drawer {
