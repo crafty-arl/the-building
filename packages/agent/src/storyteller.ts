@@ -212,7 +212,7 @@ export async function consultStoryteller(
 
 /**
  * Apply a fired event's side-effects to the tree. Returns a short string
- * describing what was applied (so index.ts can log it and/or inject into
+ * describing what was applied (so callers can log it and/or inject into
  * the next Narrator prompt).
  */
 export function applyStorytellerEvent(

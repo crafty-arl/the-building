@@ -9,7 +9,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@augur/agent": "*",
+    "@mariozechner/pi-agent-core": "^0.67.0",
+    "@mariozechner/pi-ai": "^0.67.0",
     "@simplewebauthn/server": "^13.3.0",
+    "@sinclair/typebox": "^0.34.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

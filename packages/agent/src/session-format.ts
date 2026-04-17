@@ -3,9 +3,12 @@
  *
  * Pinned format. Round-trip guarantee: load → new SessionTree → re-save
  * should be byte-identical modulo `savedAt`.
+ *
+ * Uses the narrower local Message/Usage types in ./messages.ts so the
+ * serialized shape never drifts with upstream pi-ai changes.
  */
 
-import type { Message, Usage } from "@mariozechner/pi-ai";
+import type { Message, Usage } from "./messages.ts";
 
 export const AUGUR_SESSION_FORMAT_VERSION = 1 as const;
 

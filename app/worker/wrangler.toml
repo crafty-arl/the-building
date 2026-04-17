@@ -32,3 +32,27 @@ database_id = "d936ab33-392e-47b4-b82e-bb7656cdb82e"
 # Local dev vars live in .dev.vars. For deploys:
 #   wrangler secret put CLOUDFLARE_ACCOUNT_ID
 #   wrangler secret put CLOUDFLARE_API_KEY
+
+# pi-ai pulls SDKs for every provider it supports. We only call Cloudflare's
+# openai-completions endpoint, so stub the rest to keep the bundle under the
+# 3 MB gzipped Workers ceiling. Each alias maps an unused SDK specifier to a
+# no-op proxy module (src/stubs/empty.ts).
+[alias]
+"@anthropic-ai/sdk" = "./src/stubs/empty.ts"
+"openai" = "./src/stubs/empty.ts"
+"openai/resources/chat/completions" = "./src/stubs/empty.ts"
+"openai/resources/chat/completions.js" = "./src/stubs/empty.ts"
+"@google/genai" = "./src/stubs/empty.ts"
+"@google-cloud/vertexai" = "./src/stubs/empty.ts"
+"@mistralai/mistralai" = "./src/stubs/empty.ts"
+"@aws-sdk/client-bedrock-runtime" = "./src/stubs/empty.ts"
+"proxy-agent" = "./src/stubs/empty.ts"
+"undici" = "./src/stubs/empty.ts"
+"@mariozechner/pi-ai/anthropic" = "./src/stubs/empty.ts"
+"@mariozechner/pi-ai/google" = "./src/stubs/empty.ts"
+"@mariozechner/pi-ai/google-gemini-cli" = "./src/stubs/empty.ts"
+"@mariozechner/pi-ai/google-vertex" = "./src/stubs/empty.ts"
+"@mariozechner/pi-ai/mistral" = "./src/stubs/empty.ts"
+"@mariozechner/pi-ai/openai-codex-responses" = "./src/stubs/empty.ts"
+"@mariozechner/pi-ai/openai-responses" = "./src/stubs/empty.ts"
+"@mariozechner/pi-ai/azure-openai-responses" = "./src/stubs/empty.ts"

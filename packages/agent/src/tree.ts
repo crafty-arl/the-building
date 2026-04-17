@@ -1,15 +1,17 @@
 /**
- * The session tree, stripped to the minimum that proves the seam.
+ * SessionTree — the append-only, leaf-branchable transcript for a scene.
  *
- * Each Entry is one turn. The tree is append-only, but a "leaf" can be
- * moved back to an earlier Entry — making everything after it a dormant
- * branch. A fork creates an alternate leaf from an earlier Entry.
+ * Superset of the prototype's and the worker's trees. Uses local
+ * Message/Usage types (./messages.ts) so the on-disk/DO-storage shape stays
+ * independent of pi-ai internals.
  *
- * Real Pi SessionManager has this model too; we're implementing it locally
- * to keep the prototype visible and debuggable.
+ * Public API:
+ *   add / branch / getLeaf / getLeafId / getEntry / getBranchMessages
+ *   bindFact / addVow / getFacts / getVows / renderFacts
+ *   all / totalUsage / render / toJSON / fromJSON
  */
 
-import type { Message, Usage } from "@mariozechner/pi-ai";
+import type { Message, Usage } from "./messages.ts";
 import {
   AUGUR_SESSION_FORMAT_VERSION,
   type SerializedEntry,
@@ -20,7 +22,8 @@ export interface Entry {
   id: string;
   parentId: string | null;
   card?: { id: string; mechanic: string };
-  messages: Message[]; // messages ADDED at this entry (delta from parent)
+  /** Messages ADDED at this entry (delta from parent). */
+  messages: Message[];
   usage?: Usage;
   label?: string;
   timestamp: number;
@@ -30,17 +33,20 @@ export class SessionTree {
   private entries = new Map<string, Entry>();
   private leafId: string | null = null;
   private nextId = 1;
+
   /**
-   * Scene-global facts, written by place.bind cards. Unlike messages, these
-   * are NOT branch-local: once a fact is bound, it persists across rewinds
-   * and forks. This is what makes the world feel durable.
+   * Scene-global facts, written by place.bind cards (or the bindFact tool).
+   * Unlike messages, these are NOT branch-local: once a fact is bound, it
+   * persists across rewinds and forks. This is what makes the world feel
+   * durable.
    */
   private facts = new Map<string, string>();
 
   /**
-   * Permanent constraints written by ward.vow cards. Semantically distinct
-   * from facts — vows constrain the narrator's BEHAVIOR, not the world's state.
-   * Rendered under a VOWS header so the LLM treats them as inviolable rules.
+   * Permanent constraints written by ward.vow cards (or the addVow tool).
+   * Semantically distinct from facts — vows constrain the narrator's
+   * BEHAVIOR, not the world's state. Rendered under a VOWS header so the
+   * LLM treats them as inviolable rules.
    */
   private vows: string[] = [];
 
@@ -60,16 +66,24 @@ export class SessionTree {
     return this.vows;
   }
 
+  getLeafId(): string | null {
+    return this.leafId;
+  }
+
   /** Render facts + vows as a system-prompt block, or "" if none. */
   renderFacts(): string {
     const parts: string[] = [];
     if (this.facts.size > 0) {
-      parts.push("SCENE STATE (place.bind — these facts are TRUE now and must remain true in your prose):");
+      parts.push(
+        "SCENE STATE (place.bind — these facts are TRUE now and must remain true in your prose):",
+      );
       for (const [k, v] of this.facts) parts.push(`  — ${k}: ${v}`);
     }
     if (this.vows.length > 0) {
       if (parts.length > 0) parts.push("");
-      parts.push("ACTIVE VOWS (ward.vow — inviolable for the rest of this scene; you MUST NOT violate them in narration or dialogue):");
+      parts.push(
+        "ACTIVE VOWS (ward.vow — inviolable for the rest of this scene; you MUST NOT violate them in narration or dialogue):",
+      );
       for (const v of this.vows) parts.push(`  — ${v}`);
     }
     return parts.join("\n");
@@ -94,6 +108,10 @@ export class SessionTree {
     return this.leafId ? this.entries.get(this.leafId) ?? null : null;
   }
 
+  getEntry(id: string): Entry | null {
+    return this.entries.get(id) ?? null;
+  }
+
   /** Walk leaf → root, returning messages in order. */
   getBranchMessages(): Message[] {
     const path: Entry[] = [];
@@ -109,7 +127,7 @@ export class SessionTree {
     return [...this.entries.values()].sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  /** Pretty-print the tree, marking the current leaf. */
+  /** Pretty-print the tree, marking the current leaf. CLI only. */
   render(): string {
     const out: string[] = [];
     const leaf = this.leafId;
@@ -125,11 +143,20 @@ export class SessionTree {
     return out.join("\n");
   }
 
-  /**
-   * Serialize the tree to a plain JSON-safe object. `savedAt` is filled at
-   * call time; everything else is a pure projection of current state so the
-   * format round-trips exactly (modulo that one timestamp).
-   */
+  totalUsage(): { input: number; output: number; cost: number } {
+    let input = 0;
+    let output = 0;
+    let cost = 0;
+    for (const e of this.all()) {
+      if (e.usage) {
+        input += e.usage.input;
+        output += e.usage.output;
+        cost += e.usage.cost?.total ?? 0;
+      }
+    }
+    return { input, output, cost };
+  }
+
   toJSON(sessionId: string): SerializedSession {
     const entries: SerializedEntry[] = this.all().map((e) => {
       const out: SerializedEntry = {
@@ -156,11 +183,6 @@ export class SessionTree {
     };
   }
 
-  /**
-   * Rebuild a SessionTree from a SerializedSession. The `nextId` counter is
-   * restored past the highest `eN` seen so follow-up `add()` calls don't
-   * collide with loaded ids.
-   */
   static fromJSON(data: SerializedSession): SessionTree {
     if (data.version !== AUGUR_SESSION_FORMAT_VERSION) {
       throw new Error(
@@ -191,19 +213,5 @@ export class SessionTree {
     for (const [k, v] of Object.entries(data.facts)) tree.facts.set(k, v);
     tree.vows = [...data.vows];
     return tree;
-  }
-
-  totalUsage(): { input: number; output: number; cost: number } {
-    let input = 0,
-      output = 0,
-      cost = 0;
-    for (const e of this.all()) {
-      if (e.usage) {
-        input += e.usage.input;
-        output += e.usage.output;
-        cost += e.usage.cost?.total ?? 0;
-      }
-    }
-    return { input, output, cost };
   }
 }

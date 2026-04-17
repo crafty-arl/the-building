@@ -1,20 +1,20 @@
 /**
  * Replay an Augur session JSON without making any LLM calls.
  *
- * Reads a file saved by `src/index.ts`, reconstructs the SessionTree via
- * `SessionTree.fromJSON`, then walks entries in order and prints each turn
- * in the same visual format as a live run: card headers, info lines,
- * user/assistant messages, model tags, cache-hit momentum notes, then the
- * summary, cost, and SEAMS VERIFIED blocks.
+ * Reads a file saved by `src/index.ts`, reconstructs the SessionTree, then walks
+ * entries in order and prints each turn in the same visual format as a live run.
  *
  * Usage: npm run replay -- path/to/session.json
  */
 
-import { readFileSync } from "node:fs";
-import type { Message } from "@mariozechner/pi-ai";
-import { SessionTree, type Entry } from "./tree.ts";
-import { findCard } from "./cards.ts";
-import type { SerializedSession } from "./session-format.ts";
+import {
+  assistantText,
+  type Entry,
+  findCard,
+  type Message,
+  SessionTree,
+} from "@augur/agent";
+import { loadSessionFromDisk } from "./adapters/disk-session.ts";
 
 const DIVIDER = "\n" + "─".repeat(64) + "\n";
 
@@ -24,23 +24,15 @@ function section(title: string): void {
 
 function printMessage(msg: Message): void {
   if (msg.role === "assistant") {
+    const text = assistantText(msg);
+    const modelTag = `\x1b[35m[${msg.provider ?? "?"}/${msg.model ?? "?"}]\x1b[0m`;
+    console.log(`${modelTag}\n\x1b[33m${text}\x1b[0m`);
+  } else if (msg.role === "user") {
     const text = msg.content
       .filter((c) => c.type === "text")
       .map((c) => ("text" in c ? c.text : ""))
       .join("");
-    const modelTag = `\x1b[35m[${msg.provider}/${msg.model}]\x1b[0m`;
-    console.log(`${modelTag}\n\x1b[33m${text}\x1b[0m`);
-  } else if (msg.role === "user") {
-    const text =
-      typeof msg.content === "string"
-        ? msg.content
-        : msg.content
-            .filter((c) => c.type === "text")
-            .map((c) => ("text" in c ? c.text : ""))
-            .join("");
-    const hasImage =
-      typeof msg.content !== "string" &&
-      msg.content.some((c) => c.type === "image");
+    const hasImage = msg.content.some((c) => c.type === "image");
     console.log(
       `\x1b[90m> ${text}${hasImage ? " [+image attached]" : ""}\x1b[0m`,
     );
@@ -48,8 +40,6 @@ function printMessage(msg: Message): void {
 }
 
 function headerFor(cardId: string, mechanic: string, costLabel: string): void {
-  // Try to look up the authored card for fiction/effect layers; fall back to
-  // whatever we have in the serialized entry if the card is unknown.
   let fiction = "";
   let effect = "";
   try {
@@ -65,7 +55,6 @@ function headerFor(cardId: string, mechanic: string, costLabel: string): void {
   else console.log("");
 }
 
-/** Info lines printed BEFORE the turn's messages, keyed by card id. */
 function preTurnInfo(
   entry: Entry,
   prevEntry: Entry | null,
@@ -85,9 +74,6 @@ function preTurnInfo(
       console.log(`\x1b[90m  › mind shifts: kimi → fast (llama 3.3 70b fp8-fast)\x1b[0m\n`);
       break;
     case "light-a-candle": {
-      // The live run prints `leaf moves: <currentLeaf> → <target>` where
-      // target is the parentId of the new entry and currentLeaf is the
-      // previous entry's id.
       const from = prevEntry?.id ?? "?";
       const to = entry.parentId ?? "?";
       console.log(`\x1b[90m  › leaf moves: ${from} → ${to}\x1b[0m\n`);
@@ -101,10 +87,7 @@ function preTurnInfo(
       if (target) {
         const asst = target.messages.find((m) => m.role === "assistant");
         if (asst && asst.role === "assistant") {
-          recalledText = asst.content
-            .filter((c) => c.type === "text")
-            .map((c) => ("text" in c ? c.text : ""))
-            .join("");
+          recalledText = assistantText(asst);
         }
       }
       const tid = target?.id ?? "?";
@@ -114,9 +97,6 @@ function preTurnInfo(
       break;
     }
     case "vow-of-silence":
-      // Count vows present up to and including this entry. Since vows aren't
-      // carried per-entry, we reproduce the live "active vows" count by
-      // treating each ward.vow entry as adding one vow.
       {
         let n = 0;
         for (const e of tree.all()) {
@@ -141,11 +121,9 @@ function preTurnInfo(
       );
       break;
     case "scry-the-lantern": {
-      // Find the base64 PNG length in the user message for parity with live
-      // output ("rendered 64×64 PNG of scene state (N base64 chars)").
       let len = 0;
       const user = entry.messages.find((m) => m.role === "user");
-      if (user && user.role === "user" && typeof user.content !== "string") {
+      if (user && user.role === "user") {
         for (const c of user.content) {
           if (c.type === "image" && "data" in c && typeof c.data === "string") {
             len = c.data.length;
@@ -163,7 +141,6 @@ function preTurnInfo(
   }
 }
 
-/** Footstep-cost labels matching index.ts live output. */
 const COST_LABELS: Record<string, string> = {
   "keep-the-drum": "0 footsteps",
   "ask-who-they-are": "−1 footstep",
@@ -178,41 +155,23 @@ const COST_LABELS: Record<string, string> = {
 };
 
 function replay(path: string): void {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf-8");
-  } catch (err) {
-    console.error(
-      `\x1b[31m\nFATAL:\x1b[0m could not read session file '${path}': ${(err as Error).message}`,
-    );
-    process.exit(1);
-  }
-
-  let data: SerializedSession;
-  try {
-    data = JSON.parse(raw) as SerializedSession;
-  } catch (err) {
-    console.error(
-      `\x1b[31m\nFATAL:\x1b[0m malformed JSON in '${path}': ${(err as Error).message}`,
-    );
-    process.exit(1);
-  }
-
   let tree: SessionTree;
+  let sessionId: string;
   try {
-    tree = SessionTree.fromJSON(data);
+    const loaded = loadSessionFromDisk(path);
+    tree = loaded.tree;
+    sessionId = loaded.data.sessionId;
   } catch (err) {
     console.error(
-      `\x1b[31m\nFATAL:\x1b[0m could not reconstruct session: ${(err as Error).message}`,
+      `\x1b[31m\nFATAL:\x1b[0m could not load session '${path}': ${(err as Error).message}`,
     );
     process.exit(1);
   }
 
   const entries = tree.all();
 
-  // Opening banner — matches the live run.
   section("SCENE · The Crooked Lantern · dusk · day 3");
-  console.log(`\x1b[90m  scene session id: ${data.sessionId}\x1b[0m`);
+  console.log(`\x1b[90m  scene session id: ${sessionId}\x1b[0m`);
 
   let prev: Entry | null = null;
   for (const entry of entries) {
@@ -220,12 +179,9 @@ function replay(path: string): void {
     if (!isOpen && entry.card) {
       const cost = COST_LABELS[entry.card.id] ?? "? footsteps";
       headerFor(entry.card.id, entry.card.mechanic, cost);
-      preTurnInfo(entry, prev, tree, data.sessionId);
+      preTurnInfo(entry, prev, tree, sessionId);
     }
 
-    // Messages: live run prints the user message BEFORE calling the model,
-    // then the assistant reply. Walk in stored order (user first, assistant
-    // second for a normal turn) to get the same output.
     for (const msg of entry.messages) {
       printMessage(msg);
       if (msg.role === "assistant") {
@@ -241,7 +197,6 @@ function replay(path: string): void {
     prev = entry;
   }
 
-  // Summary blocks — identical to live run.
   section("SESSION TREE");
   console.log(tree.render());
 
