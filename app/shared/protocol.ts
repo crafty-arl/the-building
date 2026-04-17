@@ -52,6 +52,40 @@ export interface SceneWire {
   npcs: string[];
 }
 
+// ─── Daily plan ────────────────────────────────────────────────────────────
+
+export interface ScheduleSlot {
+  hour: number;
+  activity: string;
+  mood?: string;
+}
+
+export interface NpcDay {
+  name: string;
+  backstory: string;
+  palette: string;
+  objective: string;
+  motive: string;
+  schedule: ScheduleSlot[];
+}
+
+export interface DailyPlan {
+  date: string;
+  dayOfWeek: string;
+  playerObjective: string;
+  npcs: NpcDay[];
+  openingHour: number;
+  closingHour: number;
+  seed: string;
+}
+
+export interface RunClock {
+  gameHour: number;
+  gameMinute: number;
+  runStartedAt: number;
+  softWarnedAt?: number;
+}
+
 // ─── Server → Client ───────────────────────────────────────────────────────
 
 export interface ServerHello {
@@ -61,6 +95,19 @@ export interface ServerHello {
   hand: CardWire[];
   tree: TreeSnapshot;
   footsteps: number;
+  dailyPlan: DailyPlan;
+  clock: RunClock;
+}
+
+export interface ServerSoftWarning {
+  type: "soft-warning";
+  remainingMs: number;
+}
+
+export interface ServerRunEnded {
+  type: "run-ended";
+  reason: "time" | "footsteps" | "schedule";
+  epitaph: string;
 }
 
 export interface ServerToken {
@@ -101,7 +148,9 @@ export type ServerMessage =
   | ServerEntry
   | ServerTree
   | ServerKicked
-  | ServerError;
+  | ServerError
+  | ServerSoftWarning
+  | ServerRunEnded;
 
 // ─── Client → Server ───────────────────────────────────────────────────────
 

@@ -1,38 +1,49 @@
 /**
- * Seam handlers — each card mechanic mapped to a tree mutation + LLM call.
- * Ported from prototype/src/index.ts (the per-turn blocks inside main()).
+ * Seam handlers — card mechanics routed through an agent loop.
  *
- * Differences vs prototype:
- *  - Streaming: each handler runs through narrate(), which streams tokens
- *    out via the `onToken` callback (the DO forwards them to the WS).
- *  - sight.scry: prototype renders an actual PNG. We don't have node-canvas
- *    in Workers; we emit a tiny placeholder PNG (1x1 transparent) so the
- *    seam still exercises the vision code path. TODO: ship a real renderer.
- *  - Session id: caller passes a stable `userId:sceneId` (not Date.now).
+ * Each card dispatches to narrate(), which can now run a multi-step agent
+ * turn: the model may call tools (bindFact / addVow / recallMemory /
+ * checkName) that mutate SessionTree mid-turn, then emit final prose.
+ *
+ * Card-driven determinism is preserved by pre-executing the card's primary
+ * mechanic with author-provided args before narration starts (for place.bind,
+ * ward.vow, memory.recall, time.branch). Narrative-only cards (act.speak,
+ * momentum.hold) get ambient tools the narrator may invoke organically,
+ * which is where new emergent dynamism comes from.
+ *
+ * The prototype used pi-ai's agent loop; in the Worker we run the loop
+ * directly against cf-ai.ts's extended complete() (tool-call streaming).
  */
 
+import type { DailyPlan, RunClock } from "../../shared/protocol.ts";
 import { type Card, findCard } from "./cards.ts";
-import {
-  STRANGER,
-  type Scene,
-  sceneSystemPrompt,
-} from "./scene.ts";
+import { STRANGER, type Scene, sceneSystemPrompt } from "./scene.ts";
 import { type Entry, SessionTree } from "./tree.ts";
 import {
   type AssistantMessage,
   type ContentPart,
   type Message,
   type UserMessage,
+  type Usage,
   assistantText,
 } from "./messages.ts";
 import {
   type ChatMessage,
   type ModelDescriptor,
+  type ToolChoice,
   FAST,
   KIMI,
   complete,
   toOpenAiContent,
 } from "./cf-ai.ts";
+import {
+  AMBIENT_TOOLS,
+  type ToolEffect,
+  type ToolSpec,
+  checkNameTool,
+  findToolSpec,
+  toolDefinitions,
+} from "./tools.ts";
 
 export interface SeamCtx {
   accountId: string;
@@ -41,10 +52,16 @@ export interface SeamCtx {
   sessionId: string;
   scene: Scene;
   tree: SessionTree;
-  /** Streaming callback: each LLM delta is forwarded as a `token` frame. */
+  /** Streaming callback: each narrative content delta is forwarded as `token`. */
   onToken: (delta: string) => void;
+  /** Optional observer for tool-effect side-channel events. */
+  onEffect?: (effect: ToolEffect) => void;
   /** Optional abort. */
   signal?: AbortSignal;
+  /** Today's plan — injects residents + schedule into the system prompt. */
+  dailyPlan?: DailyPlan;
+  /** Current in-game clock for schedule-aware narration. */
+  clock?: RunClock;
 }
 
 interface NarrateOpts {
@@ -56,14 +73,21 @@ interface NarrateOpts {
   model?: ModelDescriptor;
   minimalSystem?: boolean;
   maxTokens?: number;
+  /** Tools the narrator may call this turn. Empty/undefined disables the agent loop. */
+  tools?: ToolSpec[];
+  /** Force a specific tool (usually on the first step). Defaults to "auto". */
+  toolChoice?: ToolChoice;
 }
 
+const MAX_AGENT_STEPS = 4;
+
 /**
- * The narration primitive. Builds the message context, calls the model with
- * streaming, appends the new turn to the tree, returns the committed entry.
+ * Run a narrative turn. If `tools` are present, runs an agent loop: the model
+ * may call tools, their outputs are fed back, and the final narrative text is
+ * streamed to the client and committed to the tree.
  */
 async function narrate(ctx: SeamCtx, opts: NarrateOpts): Promise<Entry> {
-  const newMessages: Message[] = [];
+  const userMessages: Message[] = [];
   if (opts.userMessage || opts.userImagePng) {
     const content: ContentPart[] = [];
     if (opts.userMessage) content.push({ type: "text", text: opts.userMessage });
@@ -74,10 +98,10 @@ async function narrate(ctx: SeamCtx, opts: NarrateOpts): Promise<Entry> {
         mimeType: opts.userImagePng.mimeType,
       });
     }
-    newMessages.push({ role: "user", content, timestamp: Date.now() } as UserMessage);
+    userMessages.push({ role: "user", content, timestamp: Date.now() } as UserMessage);
   }
 
-  const sys = sceneSystemPrompt(ctx.scene);
+  const sys = sceneSystemPrompt(ctx.scene, ctx.dailyPlan, ctx.clock);
   const factsBlock = ctx.tree.renderFacts();
   const systemParts: string[] = [];
   if (!opts.minimalSystem) systemParts.push(sys);
@@ -86,10 +110,10 @@ async function narrate(ctx: SeamCtx, opts: NarrateOpts): Promise<Entry> {
   const systemPrompt = systemParts.join("\n\n");
 
   const priorMessages = opts.minimalSystem
-    ? newMessages
-    : [...ctx.tree.getBranchMessages(), ...newMessages];
+    ? userMessages
+    : [...ctx.tree.getBranchMessages(), ...userMessages];
 
-  const chatMessages: ChatMessage[] = [
+  const thread: ChatMessage[] = [
     { role: "system", content: systemPrompt },
     ...priorMessages.map<ChatMessage>((m) => {
       if (m.role === "system") return { role: "system", content: m.content };
@@ -99,39 +123,117 @@ async function narrate(ctx: SeamCtx, opts: NarrateOpts): Promise<Entry> {
     }),
   ];
 
-  const leaf = ctx.tree.getLeaf();
-  const parentId = leaf?.id ?? null;
   const model = opts.model ?? KIMI;
+  const useTools = !!opts.tools && opts.tools.length > 0;
+  const toolDefs = useTools ? toolDefinitions(opts.tools!) : undefined;
 
-  const result = await complete({
-    accountId: ctx.accountId,
-    apiKey: ctx.apiKey,
-    model,
-    messages: chatMessages,
-    sessionId: ctx.sessionId,
-    maxTokens: opts.maxTokens,
-    onToken: ctx.onToken,
-    signal: ctx.signal,
-  });
+  let aggregateText = "";
+  const aggregateUsage: Usage = {
+    input: 0,
+    output: 0,
+    cost: { input: 0, output: 0, total: 0 },
+  };
+  let lastProvider = "cloudflare";
+  let lastModelId = model.id;
 
-  let text = result.text;
+  const maxSteps = useTools ? MAX_AGENT_STEPS : 1;
+  let toolChoice: ToolChoice | undefined = opts.toolChoice;
+
+  for (let step = 0; step < maxSteps; step++) {
+    const isLastStep = step === maxSteps - 1;
+    // On the final step, force the model to stop calling tools and narrate.
+    const stepToolChoice: ToolChoice | undefined = useTools
+      ? isLastStep
+        ? "none"
+        : toolChoice ?? "auto"
+      : undefined;
+
+    const result = await complete({
+      accountId: ctx.accountId,
+      apiKey: ctx.apiKey,
+      model,
+      messages: thread,
+      sessionId: ctx.sessionId,
+      maxTokens: opts.maxTokens,
+      tools: toolDefs,
+      toolChoice: stepToolChoice,
+      onToken: ctx.onToken,
+      signal: ctx.signal,
+    });
+
+    if (result.text) {
+      aggregateText += aggregateText ? "\n" : "";
+      aggregateText += result.text;
+    }
+    aggregateUsage.input += result.usage.input;
+    aggregateUsage.output += result.usage.output;
+    aggregateUsage.cost.input += result.usage.cost.input;
+    aggregateUsage.cost.output += result.usage.cost.output;
+    aggregateUsage.cost.total += result.usage.cost.total;
+    lastProvider = result.provider;
+    lastModelId = result.modelId;
+
+    if (result.toolCalls.length === 0) break;
+
+    // Assistant step called tools — append the assistant message (possibly
+    // with partial content) plus tool-result messages for each call.
+    thread.push({
+      role: "assistant",
+      content: result.text || null,
+      tool_calls: result.toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: tc.argumentsJson || "{}" },
+      })),
+    });
+
+    for (const tc of result.toolCalls) {
+      const spec = findToolSpec(tc.name);
+      if (!spec) {
+        thread.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: `unknown tool: ${tc.name}`,
+        });
+        continue;
+      }
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = tc.argumentsJson ? JSON.parse(tc.argumentsJson) : {};
+      } catch {
+        parsed = {};
+      }
+      const output = await spec.execute(parsed, {
+        tree: ctx.tree,
+        onEffect: ctx.onEffect,
+      });
+      thread.push({ role: "tool", tool_call_id: tc.id, content: output });
+    }
+
+    // After the first round, don't keep forcing tool calls.
+    toolChoice = "auto";
+  }
+
+  let text = aggregateText;
   if (opts.minimalSystem) text = cleanPreamble(text);
 
   const assistant: AssistantMessage = {
     role: "assistant",
     content: [{ type: "text", text }],
     timestamp: Date.now(),
-    provider: result.provider,
-    model: result.modelId,
-    usage: result.usage,
+    provider: lastProvider,
+    model: lastModelId,
+    usage: aggregateUsage,
   };
-  newMessages.push(assistant);
 
+  // parentId is recomputed here (not at function entry) so tools like
+  // branchTime that move the leaf take effect on the committed entry.
+  const parentId = ctx.tree.getLeaf()?.id ?? null;
   const entry = ctx.tree.add({
     parentId,
     card: { id: opts.card.id, mechanic: opts.card.layers.mechanic },
-    messages: newMessages,
-    usage: result.usage,
+    messages: [...userMessages, assistant],
+    usage: aggregateUsage,
     label: opts.label,
   });
   return entry;
@@ -172,6 +274,7 @@ export async function playCard(ctx: SeamCtx, cardId: string): Promise<Entry> {
   const card = findCard(cardId);
   switch (card.layers.mechanic) {
     case "momentum.hold":
+      // Short, pure-narration passthrough — no tools.
       return narrate(ctx, {
         card,
         userMessage: `The Claw plays [${card.id}]. ${card.utterance} Render the room settling into rhythm: one short paragraph, interior only. No dialogue. Keep under 40 words.`,
@@ -179,13 +282,17 @@ export async function playCard(ctx: SeamCtx, cardId: string): Promise<Entry> {
       });
 
     case "act.speak":
+      // Ambient tools exposed — the narrator may organically bind a fact,
+      // add a vow, or surface a memory if the moment demands.
       return narrate(ctx, {
         card,
         userMessage: `The Claw plays [${card.id}]. ${card.utterance} Render ${STRANGER.name}'s terse reply and the room's reaction. Remember: he answers to his name once, and only if correctly guessed. Keep under 60 words.`,
         label: card.id,
+        tools: AMBIENT_TOOLS,
       });
 
     case "mind.fast":
+      // Instinct — no tools, no scene system prompt, fast model.
       return narrate(ctx, {
         card,
         model: FAST,
@@ -203,7 +310,8 @@ export async function playCard(ctx: SeamCtx, cardId: string): Promise<Entry> {
       });
 
     case "time.branch": {
-      // Rewind N turns from current leaf, then re-render with a mood bias.
+      // Rewind deterministically here, then let the narrator re-render the
+      // moment with a mood bias. Ambient tools stay available.
       const turns = card.rewind?.turns ?? 1;
       let cur = ctx.tree.getLeaf();
       for (let i = 0; i < turns && cur && cur.parentId; i++) {
@@ -219,32 +327,33 @@ export async function playCard(ctx: SeamCtx, cardId: string): Promise<Entry> {
         extraSystem: `MOOD BIAS FOR THIS RENDERING: ${card.rewind!.newMood}.\nThe Claw has lit a candle. The moment plays again, softer. Describe the Stranger differently this time — less guarded, more tired. He may almost answer. Keep under 60 words.`,
         userMessage: `[${card.id} · time.branch] ${card.utterance ?? ""}`.trim(),
         label: "candle-lit-asking",
+        tools: AMBIENT_TOOLS,
       });
     }
 
     case "mind.know": {
+      // Force the narrator to call checkName with the card's guessed name,
+      // then narrate the result. Ambient tools also available.
       const guess = card.knowledge!.target;
-      const truth = STRANGER.trueName;
-      const guessCorrect = guess === truth;
-      const knowBlock = [
-        "KNOWLEDGE FOR THIS TURN (mind.know):",
-        `- The Claw has just spoken a name aloud: "${guess}".`,
-        `- The Stranger's true name is: "${truth}".`,
-        `- Rule: he answers to his name once, and only once, and only if the guess matches his true name exactly.`,
-        guessCorrect
-          ? "- The guess matches. He MUST, for the first time in this scene, turn and answer to it. One line only. Then a held breath."
-          : "- The guess does NOT match. He must not answer, must not react as if named. He may show the smallest grief for the wrong name.",
-        "- Keep under 60 words.",
-      ].join("\n");
       return narrate(ctx, {
         card,
-        extraSystem: knowBlock,
+        extraSystem: [
+          `The Claw has just spoken the name "${guess}" aloud, once.`,
+          `FIRST, call the \`checkName\` tool with name="${guess}". Its result will tell you whether the name matches and exactly how the Stranger must (or must not) react.`,
+          `THEN, narrate the beat in under 60 words. Do not reveal the Stranger's true name yourself; let the tool's rule govern his reaction.`,
+        ].join("\n"),
         userMessage: `The Claw plays [${card.id}]. ${card.utterance}`,
-        label: guessCorrect ? "named-true" : "named-wrong",
+        // We don't know ahead of time whether the guess matches; label with
+        // a neutral sentinel and let downstream look at the tool effect.
+        label: guess === STRANGER.trueName ? "named-true" : "named-wrong",
+        tools: [checkNameTool, ...AMBIENT_TOOLS],
+        toolChoice: { type: "function", function: { name: "checkName" } },
       });
     }
 
     case "memory.recall": {
+      // Pre-surface the memory deterministically (card specifies which entry),
+      // inject into system prompt, then narrate under ambient tools.
       const target = ctx.tree.all().find((e) => e.label === card.recall!.entryLabel);
       let recalledText = "";
       if (target) {
@@ -265,23 +374,33 @@ export async function playCard(ctx: SeamCtx, cardId: string): Promise<Entry> {
         extraSystem: recallBlock,
         userMessage: `The Claw plays [${card.id}]. ${card.utterance}`,
         label: "recalled",
+        tools: AMBIENT_TOOLS,
       });
     }
 
     case "ward.vow":
+      // Pre-execute the vow (deterministic, card-authored), then narrate.
       ctx.tree.addVow(card.vow!);
+      ctx.onEffect?.({ kind: "vow", payload: { text: card.vow! } });
       return narrate(ctx, {
         card,
         userMessage: `The Claw plays [${card.id}]. ${card.utterance} Render the act of vowing: internal, silent, weighted. No dialogue from the Claw. Keep under 50 words.`,
         label: "vow-spoken",
+        tools: AMBIENT_TOOLS,
       });
 
     case "place.bind":
+      // Pre-execute the fact binding (deterministic), then narrate.
       ctx.tree.bindFact(card.bind!.key, card.bind!.value);
+      ctx.onEffect?.({
+        kind: "fact",
+        payload: { key: card.bind!.key, value: card.bind!.value },
+      });
       return narrate(ctx, {
         card,
         userMessage: `The Claw plays [${card.id}]. ${card.utterance} Render the act and the room's response. Keep under 60 words.`,
         label: "door-bolted",
+        tools: AMBIENT_TOOLS,
       });
 
     case "sight.scry": {
@@ -303,6 +422,7 @@ export async function playCard(ctx: SeamCtx, cardId: string): Promise<Entry> {
         userMessage: `The Claw plays [${card.id}]. ${card.utterance} Read what you see and speak it back.`,
         userImagePng: { data: pngB64, mimeType: "image/png" },
         label: "scried",
+        tools: AMBIENT_TOOLS,
       });
     }
   }

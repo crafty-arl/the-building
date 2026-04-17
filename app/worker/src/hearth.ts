@@ -1,18 +1,23 @@
 /**
  * Hearth Durable Object — one per user.
  *
- * Owns the SessionTree, the current scene (hardcoded TAVERN for now), the
- * footsteps counter, and the live WebSocket. Persists the tree to DO storage
- * on every mutation. Uses Hibernatable WebSockets so an idle session doesn't
- * burn CPU.
+ * Owns the SessionTree, the daily plan + run clock, the footsteps counter,
+ * and the live WebSocket. Persists to DO storage on every mutation. Uses
+ * Hibernatable WebSockets so an idle session doesn't burn CPU.
+ *
+ * Runs are time-boxed to a hybrid 15-min soft / 25-min hard ceiling. The
+ * daily plan is regenerated once per UTC calendar day; subsequent runs
+ * within the same day advance the in-game clock (+2h per run, clamped).
  */
 
 import type {
   ClientMessage,
+  DailyPlan,
+  RunClock,
   ServerMessage,
 } from "../../shared/protocol.ts";
 import { computeHand } from "./hand.ts";
-import { TAVERN } from "./scene.ts";
+import { buildScene, TAVERN } from "./scene.ts";
 import {
   type SeamCtx,
   maybeOpenScene,
@@ -24,21 +29,28 @@ import {
   SessionTree,
 } from "./tree.ts";
 import { entryToWire, sceneToWire, treeToWire } from "./wire.ts";
+import { generateDailyPlan, slotForHour, todayUtc } from "./daily-plan.ts";
+import { parseAiResponse } from "./ai-util.ts";
 
 export interface HearthEnv {
   HEARTH: DurableObjectNamespace;
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_API_KEY: string;
+  AI: Ai;
 }
 
 const STORAGE_TREE = "tree";
 const STORAGE_FOOTSTEPS = "footsteps";
 const STORAGE_USERID = "userId";
+const STORAGE_DAILY_PLAN = "dailyPlan";
+const STORAGE_CLOCK = "clock";
 const INITIAL_FOOTSTEPS = 8;
+const HOURS_PER_RUN = 2;
+const SOFT_WARNING_MS = 15 * 60 * 1000;
+const HARD_CUTOFF_MS = 25 * 60 * 1000;
 
 interface SocketAttachment {
   userId: string;
-  /** Wallclock when this socket was accepted, used to identify "the" active one. */
   acceptedAt: number;
 }
 
@@ -48,6 +60,8 @@ export class Hearth implements DurableObject {
   private tree: SessionTree | null = null;
   private footsteps = INITIAL_FOOTSTEPS;
   private userId = "anonymous";
+  private dailyPlan: DailyPlan | null = null;
+  private clock: RunClock | null = null;
   private loaded: Promise<void>;
 
   constructor(state: DurableObjectState, env: HearthEnv) {
@@ -67,16 +81,23 @@ export class Hearth implements DurableObject {
       (await this.state.storage.get<number>(STORAGE_FOOTSTEPS)) ?? INITIAL_FOOTSTEPS;
     this.userId =
       (await this.state.storage.get<string>(STORAGE_USERID)) ?? "anonymous";
+    this.dailyPlan =
+      (await this.state.storage.get<DailyPlan>(STORAGE_DAILY_PLAN)) ?? null;
+    this.clock =
+      (await this.state.storage.get<RunClock>(STORAGE_CLOCK)) ?? null;
   }
 
   private async persist(): Promise<void> {
     if (!this.tree) return;
+    const sceneId = this.dailyPlan ? `day-${this.dailyPlan.date}` : TAVERN.id;
     await this.state.storage.put(
       STORAGE_TREE,
-      this.tree.toJSON(`${this.userId}:${TAVERN.id}`),
+      this.tree.toJSON(`${this.userId}:${sceneId}`),
     );
     await this.state.storage.put(STORAGE_FOOTSTEPS, this.footsteps);
     await this.state.storage.put(STORAGE_USERID, this.userId);
+    if (this.dailyPlan) await this.state.storage.put(STORAGE_DAILY_PLAN, this.dailyPlan);
+    if (this.clock) await this.state.storage.put(STORAGE_CLOCK, this.clock);
   }
 
   async fetch(req: Request): Promise<Response> {
@@ -116,47 +137,87 @@ export class Hearth implements DurableObject {
     this.state.acceptWebSocket(server);
     server.serializeAttachment(attachment);
 
-    // Open the scene if needed, then send hello.
-    await this.ensureSceneOpenAndHello(server);
+    await this.ensureRunStartedAndHello(server);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async ensureSceneOpenAndHello(ws: WebSocket): Promise<void> {
+  /**
+   * Prepare the daily plan + run clock for this connection, then send `hello`.
+   * New UTC day → regenerate plan + reset tree + footsteps. Same day → advance
+   * the in-game clock for a new run. Always stamps a fresh runStartedAt.
+   */
+  private async ensureRunStartedAndHello(ws: WebSocket): Promise<void> {
     if (!this.tree) this.tree = new SessionTree();
-    const ctx = this.makeCtx((delta, turnId) => this.sendToken(ws, delta, turnId));
-    // For scene-open we don't have a turnId yet, so swallow tokens.
-    const tokenCollectorCtx: SeamCtx = { ...ctx, onToken: () => {} };
-    const opened = await maybeOpenScene(tokenCollectorCtx);
+    const today = todayUtc();
+
+    if (!this.dailyPlan || this.dailyPlan.date !== today) {
+      this.dailyPlan = await generateDailyPlan(this.env, today);
+      this.tree = new SessionTree();
+      this.footsteps = INITIAL_FOOTSTEPS;
+      this.clock = {
+        gameHour: this.dailyPlan.openingHour,
+        gameMinute: 0,
+        runStartedAt: Date.now(),
+      };
+    } else {
+      const prevHour = this.clock?.gameHour ?? this.dailyPlan.openingHour;
+      const nextHour = Math.min(
+        this.dailyPlan.closingHour,
+        prevHour + HOURS_PER_RUN,
+      );
+      this.clock = {
+        gameHour: nextHour,
+        gameMinute: 0,
+        runStartedAt: Date.now(),
+      };
+      this.footsteps = INITIAL_FOOTSTEPS;
+    }
+    await this.persist();
+
+    const ctx = this.makeCtx(() => {});
+    const opened = await maybeOpenScene(ctx);
     if (opened) await this.persist();
+
     this.sendHello(ws);
+
+    // If we're already at or past closing, end the run immediately.
+    if (this.dailyPlan && this.clock.gameHour >= this.dailyPlan.closingHour) {
+      await this.endRun(ws, "schedule");
+    }
+  }
+
+  private currentScene() {
+    if (!this.dailyPlan || !this.clock) return TAVERN;
+    return buildScene(this.dailyPlan, this.clock);
   }
 
   private sendHello(ws: WebSocket): void {
-    if (!this.tree) return;
+    if (!this.tree || !this.dailyPlan || !this.clock) return;
     const msg: ServerMessage = {
       type: "hello",
       userId: this.userId,
-      scene: sceneToWire(TAVERN),
+      scene: sceneToWire(this.currentScene()),
       hand: computeHand(this.tree, this.footsteps),
       tree: treeToWire(this.tree),
       footsteps: this.footsteps,
+      dailyPlan: this.dailyPlan,
+      clock: this.clock,
     };
     safeSend(ws, msg);
   }
 
-  private sendToken(ws: WebSocket, delta: string, turnId: string): void {
-    safeSend(ws, { type: "token", delta, turnId });
-  }
-
   private makeCtx(onToken: (delta: string, turnId: string) => void): SeamCtx {
+    const scene = this.currentScene();
     return {
       accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
       apiKey: this.env.CLOUDFLARE_API_KEY,
-      sessionId: `${this.userId}:${TAVERN.id}`,
-      scene: TAVERN,
+      sessionId: `${this.userId}:${scene.id}`,
+      scene,
       tree: this.tree!,
       onToken: (delta) => onToken(delta, "pending"),
+      dailyPlan: this.dailyPlan ?? undefined,
+      clock: this.clock ?? undefined,
     };
   }
 
@@ -200,13 +261,25 @@ export class Hearth implements DurableObject {
   }
 
   private async handlePlay(ws: WebSocket, cardId: string): Promise<void> {
-    if (!this.tree) {
-      safeSend(ws, { type: "error", message: "tree not initialized" });
+    if (!this.tree || !this.clock || !this.dailyPlan) {
+      safeSend(ws, { type: "error", message: "run not initialized" });
       return;
     }
 
-    // Find the card to validate cost up front. Hand computation gives the
-    // authoritative playability check.
+    const elapsed = Date.now() - this.clock.runStartedAt;
+    if (elapsed >= HARD_CUTOFF_MS) {
+      await this.endRun(ws, "time");
+      return;
+    }
+    if (elapsed >= SOFT_WARNING_MS && !this.clock.softWarnedAt) {
+      this.clock.softWarnedAt = Date.now();
+      await this.state.storage.put(STORAGE_CLOCK, this.clock);
+      safeSend(ws, {
+        type: "soft-warning",
+        remainingMs: HARD_CUTOFF_MS - elapsed,
+      });
+    }
+
     const hand = computeHand(this.tree, this.footsteps);
     const card = hand.find((c) => c.id === cardId);
     if (!card) {
@@ -219,13 +292,8 @@ export class Hearth implements DurableObject {
     }
 
     const turnId = `t${Date.now()}`;
-
     const ctx: SeamCtx = {
-      accountId: this.env.CLOUDFLARE_ACCOUNT_ID,
-      apiKey: this.env.CLOUDFLARE_API_KEY,
-      sessionId: `${this.userId}:${TAVERN.id}`,
-      scene: TAVERN,
-      tree: this.tree,
+      ...this.makeCtx(() => {}),
       onToken: (delta) => safeSend(ws, { type: "token", delta, turnId }),
     };
 
@@ -250,6 +318,80 @@ export class Hearth implements DurableObject {
       footsteps: this.footsteps,
       hand: computeHand(this.tree, this.footsteps),
     });
+
+    if (this.footsteps <= 0) {
+      await this.endRun(ws, "footsteps");
+    }
+  }
+
+  /**
+   * Compose a one-line epitaph and close the socket. Reuses env.AI directly
+   * (same llama model as /api/rpg/epitaph) with a short prompt.
+   */
+  private async endRun(
+    ws: WebSocket,
+    reason: "time" | "footsteps" | "schedule",
+  ): Promise<void> {
+    const epitaph = await this.runEpitaph(reason);
+    safeSend(ws, { type: "run-ended", reason, epitaph });
+    try {
+      ws.close(1000, `run-ended:${reason}`);
+    } catch {
+      // ignore
+    }
+  }
+
+  private async runEpitaph(
+    reason: "time" | "footsteps" | "schedule",
+  ): Promise<string> {
+    if (!this.dailyPlan || !this.clock) return "The room is quiet now.";
+    const residentLines = this.dailyPlan.npcs
+      .map((n) => {
+        const slot = slotForHour(n, this.clock!.gameHour);
+        return `${n.name} (${slot?.activity ?? "present"})`;
+      })
+      .join("; ");
+    const reasonLine =
+      reason === "time"
+        ? "The Claw's visit ran long."
+        : reason === "footsteps"
+          ? "The Claw ran out of footsteps."
+          : "The room closed for the day.";
+    const userPrompt = [
+      `Room: ${TAVERN.location}. It is ${this.clock.gameHour}:00 on ${this.dailyPlan.dayOfWeek}.`,
+      `Today's objective: ${this.dailyPlan.playerObjective}`,
+      `Residents: ${residentLines}`,
+      reasonLine,
+      `Compose one line, under 100 characters, carved-in-stone plain. Past tense. Return STRICT JSON {"epitaph":"..."}.`,
+    ].join("\n");
+    try {
+      const ai = (await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+        messages: [
+          {
+            role: "system",
+            content:
+              "You compose one-line epitaphs for a quiet tabletop RPG. No adjectives. Past tense. Return STRICT JSON {\"epitaph\":\"...\"}.",
+          },
+          { role: "user", content: userPrompt },
+        ],
+        max_tokens: 120,
+        temperature: 0.7,
+      } as never)) as unknown;
+      const parsed = parseAiResponse(ai);
+      const epi = parsed && typeof parsed === "object"
+        ? (parsed as { epitaph?: unknown }).epitaph
+        : null;
+      if (typeof epi === "string" && epi.trim()) {
+        return epi.trim().slice(0, 120);
+      }
+    } catch {
+      // fall through to fallback
+    }
+    return reason === "time"
+      ? "The candle guttered. They stayed anyway."
+      : reason === "footsteps"
+        ? "The Claw sat down. There was nothing else to give."
+        : "The lantern went out. The day was done.";
   }
 }
 

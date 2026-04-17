@@ -15,10 +15,13 @@ interface Props {
  */
 export function TopBar({ status }: Props) {
   const scene = useAugur((s) => s.scene);
+  const dailyPlan = useAugur((s) => s.dailyPlan);
+  const clock = useAugur((s) => s.clock);
 
-  // TODO(proxy): run/pack name is not on the wire yet.
-  const packName = "THE PRIMAL SCRIPT";
-  const sceneNum = "SCENE I";
+  const packName = dailyPlan ? dailyPlan.dayOfWeek.toUpperCase() : "TODAY";
+  const sceneNum = clock
+    ? `${String(clock.gameHour).padStart(2, "0")}:${String(clock.gameMinute).padStart(2, "0")}`
+    : "—";
   const sceneName = (scene?.location ?? "A QUIET ROOM").toUpperCase();
 
   const liveLabel =

@@ -6,10 +6,10 @@
  *   - chat/completions with stream=true
  *   - SSE parsing of `data: {...}` lines
  *   - extract delta.content and forward to a per-token callback
+ *   - extract delta.tool_calls and accumulate across frames (function-calling)
  *
- * Returns the final assembled assistant text + a coarse usage estimate
- * (Cloudflare's OpenAI-compat layer surfaces `usage` on the terminal frame
- * for most models; if absent we fall back to a token-character heuristic).
+ * Returns the final assembled assistant text, any tool_calls the model made,
+ * and a coarse usage estimate.
  */
 
 import type { ContentPart, Usage } from "./messages.ts";
@@ -33,15 +33,47 @@ export const FAST: ModelDescriptor = {
   cost: { input: 0, output: 0 },
 };
 
-export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  /** OpenAI-compat: string OR multi-part content array (for vision). */
-  content: string | OpenAiContentPart[];
+// ── Chat message shapes (OpenAI-compat) ──────────────────────────────────────
+
+export interface ChatToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
 }
+
+export type ChatMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | OpenAiContentPart[] }
+  | {
+      role: "assistant";
+      content?: string | null;
+      tool_calls?: ChatToolCall[];
+    }
+  | { role: "tool"; tool_call_id: string; content: string };
 
 export type OpenAiContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
+
+// ── Tool definitions ─────────────────────────────────────────────────────────
+
+export interface ToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    /** JSON Schema for arguments. */
+    parameters: Record<string, unknown>;
+  };
+}
+
+export type ToolChoice =
+  | "auto"
+  | "none"
+  | "required"
+  | { type: "function"; function: { name: string } };
+
+// ── Call options + result ────────────────────────────────────────────────────
 
 export interface CompleteOpts {
   accountId: string;
@@ -51,27 +83,43 @@ export interface CompleteOpts {
   /** Stable id sent as `x-session-affinity` to keep momentum.hold cache hits. */
   sessionId: string;
   maxTokens?: number;
-  /** Per-token streaming callback. */
+  tools?: ToolDefinition[];
+  toolChoice?: ToolChoice;
+  /** Per-token streaming callback — only fires on content deltas, not tool_call deltas. */
   onToken?: (delta: string) => void;
   /** AbortSignal to cancel mid-stream. */
   signal?: AbortSignal;
 }
 
+export interface ToolCall {
+  id: string;
+  name: string;
+  /** Raw accumulated JSON string from the stream; parse at call-site. */
+  argumentsJson: string;
+}
+
 export interface CompleteResult {
   text: string;
+  toolCalls: ToolCall[];
   usage: Usage;
   provider: "cloudflare";
   modelId: string;
+  /** Why the model stopped: "stop" | "tool_calls" | "length" | etc. */
+  finishReason: string | null;
 }
 
 export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
   const url = `https://api.cloudflare.com/client/v4/accounts/${opts.accountId}/ai/v1/chat/completions`;
-  const body = {
+  const body: Record<string, unknown> = {
     model: opts.model.id,
     messages: opts.messages,
     stream: true,
-    ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
   };
+  if (opts.maxTokens) body.max_tokens = opts.maxTokens;
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools;
+    body.tool_choice = opts.toolChoice ?? "auto";
+  }
 
   const res = await fetch(url, {
     method: "POST",
@@ -95,6 +143,15 @@ export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
     output: 0,
     cost: { input: 0, output: 0, total: 0 },
   };
+  let finishReason: string | null = null;
+
+  // Tool calls can stream across many frames. OpenAI-compat: each delta has
+  // `tool_calls: [{ index, id?, type?, function: { name?, arguments? } }]`.
+  // Accumulate by index; id/name arrive early, arguments chunk in over time.
+  const toolAcc = new Map<
+    number,
+    { id: string; name: string; argumentsJson: string }
+  >();
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -124,10 +181,28 @@ export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
       } catch {
         continue;
       }
-      const delta = json?.choices?.[0]?.delta?.content;
-      if (typeof delta === "string" && delta.length > 0) {
-        text += delta;
-        opts.onToken?.(delta);
+      const choice = json?.choices?.[0];
+      const delta = choice?.delta;
+      if (typeof delta?.content === "string" && delta.content.length > 0) {
+        text += delta.content;
+        opts.onToken?.(delta.content);
+      }
+      if (Array.isArray(delta?.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const i = typeof tc.index === "number" ? tc.index : 0;
+          const prev = toolAcc.get(i) ?? { id: "", name: "", argumentsJson: "" };
+          if (typeof tc.id === "string" && tc.id.length > 0) prev.id = tc.id;
+          if (typeof tc.function?.name === "string" && tc.function.name.length > 0) {
+            prev.name = tc.function.name;
+          }
+          if (typeof tc.function?.arguments === "string") {
+            prev.argumentsJson += tc.function.arguments;
+          }
+          toolAcc.set(i, prev);
+        }
+      }
+      if (typeof choice?.finish_reason === "string") {
+        finishReason = choice.finish_reason;
       }
       // Cloudflare emits a final frame with usage on most models.
       if (json?.usage) {
@@ -140,13 +215,33 @@ export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
   if (usage.input === 0 && usage.output === 0) {
     // Heuristic fallback: ~4 chars/token.
     const inputChars = opts.messages.reduce((n, m) => {
-      if (typeof m.content === "string") return n + m.content.length;
-      return n + m.content.reduce((nn, p) => nn + (p.type === "text" ? p.text.length : 0), 0);
+      const c = (m as { content?: unknown }).content;
+      if (typeof c === "string") return n + c.length;
+      if (Array.isArray(c)) {
+        return n + c.reduce((nn: number, p: OpenAiContentPart) => nn + (p.type === "text" ? p.text.length : 0), 0);
+      }
+      return n;
     }, 0);
     usage = computeUsage(opts.model, Math.ceil(inputChars / 4), Math.ceil(text.length / 4));
   }
 
-  return { text, usage, provider: "cloudflare", modelId: opts.model.id };
+  const toolCalls: ToolCall[] = [...toolAcc.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, v]) => ({
+      id: v.id || cryptoRandomId(),
+      name: v.name,
+      argumentsJson: v.argumentsJson,
+    }))
+    .filter((t) => t.name.length > 0);
+
+  return {
+    text,
+    toolCalls,
+    usage,
+    provider: "cloudflare",
+    modelId: opts.model.id,
+    finishReason,
+  };
 }
 
 function computeUsage(model: ModelDescriptor, input: number, output: number): Usage {
@@ -157,6 +252,11 @@ function computeUsage(model: ModelDescriptor, input: number, output: number): Us
     output,
     cost: { input: inCost, output: outCost, total: inCost + outCost },
   };
+}
+
+function cryptoRandomId(): string {
+  // Fallback if the model omits an id on a streamed tool_call fragment.
+  return `call_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /** Convert our internal ContentPart[] (with optional image) to OpenAI-compat content. */

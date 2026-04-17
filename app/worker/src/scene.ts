@@ -1,6 +1,10 @@
 /**
- * Scene definitions — ported verbatim from prototype/src/scene.ts.
+ * Scene definitions — ported from prototype/src/scene.ts, extended with
+ * daily-plan overlays (timeOfDay + residents derived from DailyPlan + clock).
  */
+
+import type { DailyPlan, RunClock } from "../../shared/protocol.ts";
+import { slotForHour, timeOfDayForHour } from "./daily-plan.ts";
 
 export interface Scene {
   id: string;
@@ -28,6 +32,20 @@ export const TAVERN: Scene = {
     "The scene opens with the Stranger watching the door. He already knows you are here. The bar is quiet. The Claw notices the lantern swings without wind.",
 };
 
+/**
+ * Project a DailyPlan + RunClock onto TAVERN: override timeOfDay from the
+ * in-game hour and add plan residents to the NPC roster alongside the Stranger.
+ */
+export function buildScene(plan: DailyPlan, clock: RunClock): Scene {
+  const extraNpcs = plan.npcs.map((n) => n.name);
+  return {
+    ...TAVERN,
+    id: `day-${plan.date}-${clock.gameHour.toString().padStart(2, "0")}`,
+    timeOfDay: timeOfDayForHour(clock.gameHour),
+    npcs: [...TAVERN.npcs, ...extraNpcs],
+  };
+}
+
 export const STRANGER = {
   id: "the-stranger",
   name: "The Stranger",
@@ -37,8 +55,12 @@ export const STRANGER = {
   moodSeed: "tense",
 };
 
-export function sceneSystemPrompt(scene: Scene): string {
-  return [
+export function sceneSystemPrompt(
+  scene: Scene,
+  plan?: DailyPlan,
+  clock?: RunClock,
+): string {
+  const parts: string[] = [
     "You are AUGUR, the compass. You narrate in first person for the player's Claw — terse, specific, occult-folk register. Short sentences. Specific nouns (lantern, threshold, silt, kin, offering). No neon, no slang.",
     "",
     "This is a small village at the edge of a kingdom that no longer keeps its records.",
@@ -57,7 +79,27 @@ export function sceneSystemPrompt(scene: Scene): string {
     "",
     "AUTHORED BEAT:",
     scene.authoredPrompt,
+  ];
+  if (plan && clock) {
+    parts.push(
+      "",
+      `TODAY: ${plan.dayOfWeek} ${plan.date}. It is ${String(clock.gameHour).padStart(2, "0")}:${String(clock.gameMinute).padStart(2, "0")}.`,
+      `SEED: ${plan.seed}`,
+      `PLAYER OBJECTIVE TODAY: ${plan.playerObjective}`,
+    );
+    if (plan.npcs.length > 0) {
+      parts.push("", "RESIDENTS RIGHT NOW:");
+      for (const npc of plan.npcs) {
+        const slot = slotForHour(npc, clock.gameHour);
+        parts.push(
+          `  — ${npc.name} (${npc.palette}): ${slot?.activity ?? "present"}${slot?.mood ? ` · ${slot.mood}` : ""}`,
+        );
+      }
+    }
+  }
+  parts.push(
     "",
     "Write the scene now in first-person past tense, as if the Claw is recording it in a journal.",
-  ].join("\n");
+  );
+  return parts.join("\n");
 }
