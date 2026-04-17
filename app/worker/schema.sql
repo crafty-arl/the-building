@@ -42,3 +42,12 @@ CREATE TABLE IF NOT EXISTS game_state (
   PRIMARY KEY (user_id, entity_type, entity_id)
 );
 CREATE INDEX IF NOT EXISTS idx_game_state_user ON game_state(user_id);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint   TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  p256dh     TEXT NOT NULL,
+  auth       TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);
