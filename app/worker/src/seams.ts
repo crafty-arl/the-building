@@ -11,6 +11,7 @@
  *  - Session id: caller passes a stable `userId:sceneId` (not Date.now).
  */
 
+import type { DailyPlan, RunClock } from "../../shared/protocol.ts";
 import { type Card, findCard } from "./cards.ts";
 import {
   STRANGER,
@@ -45,6 +46,10 @@ export interface SeamCtx {
   onToken: (delta: string) => void;
   /** Optional abort. */
   signal?: AbortSignal;
+  /** Today's plan — injects residents + schedule into the system prompt. */
+  dailyPlan?: DailyPlan;
+  /** Current in-game clock for schedule-aware narration. */
+  clock?: RunClock;
 }
 
 interface NarrateOpts {
@@ -77,7 +82,7 @@ async function narrate(ctx: SeamCtx, opts: NarrateOpts): Promise<Entry> {
     newMessages.push({ role: "user", content, timestamp: Date.now() } as UserMessage);
   }
 
-  const sys = sceneSystemPrompt(ctx.scene);
+  const sys = sceneSystemPrompt(ctx.scene, ctx.dailyPlan, ctx.clock);
   const factsBlock = ctx.tree.renderFacts();
   const systemParts: string[] = [];
   if (!opts.minimalSystem) systemParts.push(sys);

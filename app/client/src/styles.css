@@ -1089,3 +1089,69 @@ button {
     max-height: 70vh;
   }
 }
+
+/* Soft-warning banner: appears when a run is ~15 min in. */
+.soft-warning-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  background: rgba(200, 160, 70, 0.18);
+  border: 1px solid rgba(200, 160, 70, 0.55);
+  color: #d6b86a;
+  padding: 6px 14px 6px 14px;
+  border-radius: 3px;
+  font-family: "Crimson Pro", Georgia, serif;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.soft-warning-banner button {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+/* Run-ended overlay: carved epitaph card. */
+.run-end-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(10, 10, 14, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+.run-end-card {
+  max-width: 440px;
+  background: #15151a;
+  border: 1px solid #2a2a30;
+  padding: 28px 28px 22px;
+  text-align: center;
+  font-family: "Crimson Pro", Georgia, serif;
+}
+.run-end-header {
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 12px;
+  color: #7a7a82;
+  margin-bottom: 14px;
+}
+.run-end-epitaph {
+  font-size: 19px;
+  line-height: 1.4;
+  color: #d8d4c6;
+  font-style: italic;
+  margin-bottom: 18px;
+}
+.run-end-foot {
+  font-size: 13px;
+  color: #6f6f76;
+}

@@ -16,6 +16,7 @@ export function StateStrip() {
   const vows = useAugur((s) => s.tree.vows);
   const facts = useAugur((s) => s.tree.facts);
   const tree = useAugur((s) => s.tree);
+  const dailyPlan = useAugur((s) => s.dailyPlan);
 
   const branch = useMemo(
     () => activeBranch(tree.entries, tree.leafId),
@@ -31,8 +32,7 @@ export function StateStrip() {
   const firstVow = vows[0];
   const firstFactEntry = Object.entries(facts)[0];
 
-  // TODO(proxy): pack-level objective.
-  const objective = "learn why the archivist is gone";
+  const objective = dailyPlan?.playerObjective ?? "—";
 
   return (
     <section className="statestrip" aria-label="Scene state">
