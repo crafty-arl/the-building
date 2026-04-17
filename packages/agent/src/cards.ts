@@ -1,5 +1,5 @@
 /**
- * The seven seams reduced to two cards for the single-seam proof.
+ * The seven seams reduced to cards for the single-seam proof.
  *  - `act.speak`  → forward progression (normal LLM turn)
  *  - `time.branch` → rewind N entries, re-render with a new mood bias
  *
