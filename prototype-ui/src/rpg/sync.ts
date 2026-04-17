@@ -71,8 +71,9 @@ export async function pushBuilding(b: BuildingState): Promise<void> {
       if (r.status === "ok") versions[`building:${r.id}`] = r.version;
     }
     writeVersions(versions);
+    noteSyncSuccess();
   } catch {
-    /* offline — will retry next save */
+    noteSyncFailure();
   }
 }
 
@@ -104,8 +105,10 @@ export async function pushRoom(
       versions[`room:${r.id}`] = r.version;
       writeVersions(versions);
     }
+    noteSyncSuccess();
     return r;
   } catch {
+    noteSyncFailure();
     return null;
   }
 }
@@ -173,11 +176,33 @@ export async function releaseLock(roomId: string): Promise<void> {
 }
 
 let pushTimer: number | null = null;
+let consecutiveFailures = 0;
+let nextAttemptAt = 0;
+
+function noteSyncFailure(): void {
+  consecutiveFailures = Math.min(consecutiveFailures + 1, 4);
+  // 4s, 8s, 16s, 32s after successive offline failures.
+  nextAttemptAt = Date.now() + 2000 * 2 ** consecutiveFailures;
+}
+
+function noteSyncSuccess(): void {
+  if (consecutiveFailures === 0) return;
+  consecutiveFailures = 0;
+  nextAttemptAt = 0;
+}
+
+// Lets useHearth reset the backoff when the WS reopens — if the worker is
+// reachable by the socket, it's almost certainly reachable by sync too.
+export function resetSyncBackoff(): void {
+  noteSyncSuccess();
+}
 
 export function enqueuePush(fn: () => void): void {
   if (pushTimer) window.clearTimeout(pushTimer);
+  const baseDelay = 2000;
+  const offlineDelay = Math.max(0, nextAttemptAt - Date.now());
   pushTimer = window.setTimeout(() => {
     pushTimer = null;
     fn();
-  }, 2000);
+  }, Math.max(baseDelay, offlineDelay));
 }

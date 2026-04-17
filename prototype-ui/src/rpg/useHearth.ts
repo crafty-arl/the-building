@@ -13,6 +13,7 @@ import type {
 } from "../../../app/shared/protocol";
 import { getUserId } from "./auth";
 import { currentRoomId, loadRoomById } from "./engine";
+import { resetSyncBackoff } from "./sync";
 
 export type HearthStatus = "idle" | "connecting" | "open" | "closed" | "error";
 
@@ -173,6 +174,7 @@ export function useHearth(opts: { enabled: boolean; roomId: string | null; invit
         backoffMs = 500;
         setStatus("open");
         setTerminal(null);
+        resetSyncBackoff();
       });
 
       const scheduleReconnect = () => {
