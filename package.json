@@ -5,7 +5,6 @@
   "workspaces": [
     "app/shared",
     "app/worker",
-    "app/client",
     "prototype",
     "prototype-ui",
     "packages/*"
