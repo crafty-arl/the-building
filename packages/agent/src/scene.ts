@@ -1,9 +1,14 @@
 /**
- * The first authored scene — the Crooked Lantern tavern.
+ * Scene definitions. The TAVERN scene is authored; buildScene() overlays
+ * today's DailyPlan + RunClock onto it so the system prompt sees the
+ * current time of day and today's residents.
  *
- * Authored spine. The LLM fills prose within these constraints. It may NOT
- * invent NPCs outside `npcs`, contradict moods, or depart from `hooks`.
+ * Text is preserved byte-for-byte with app/worker/src/scene.ts so the Kimi
+ * prefix cache stays warm across the migration.
  */
+
+import type { DailyPlan, RunClock } from "./schedule-types.ts";
+import { slotForHour, timeOfDayForHour } from "./daily-plan.ts";
 
 export interface Scene {
   id: string;
@@ -31,22 +36,35 @@ export const TAVERN: Scene = {
     "The scene opens with the Stranger watching the door. He already knows you are here. The bar is quiet. The Claw notices the lantern swings without wind.",
 };
 
+/**
+ * Project a DailyPlan + RunClock onto TAVERN: override timeOfDay from the
+ * in-game hour and add plan residents to the NPC roster alongside the Stranger.
+ */
+export function buildScene(plan: DailyPlan, clock: RunClock): Scene {
+  const extraNpcs = plan.npcs.map((n) => n.name);
+  return {
+    ...TAVERN,
+    id: `day-${plan.date}-${clock.gameHour.toString().padStart(2, "0")}`,
+    timeOfDay: timeOfDayForHour(clock.gameHour),
+    npcs: [...TAVERN.npcs, ...extraNpcs],
+  };
+}
+
 export const STRANGER = {
   id: "the-stranger",
   name: "The Stranger",
-  /** The name the Claw must guess. Never leaked to the LLM unless a mind.know card reveals it. */
   trueName: "Adrik",
   persona:
     "A man who lost something decades ago and has been waiting for it to come back. Speaks as if every sentence is the last he'll be allowed. He will answer to his name once, and only after it has been guessed correctly.",
   moodSeed: "tense",
 };
 
-/**
- * The system prompt for the scene renderer. This is the LLM's contract —
- * what it must and must not do when narrating.
- */
-export function sceneSystemPrompt(scene: Scene): string {
-  return [
+export function sceneSystemPrompt(
+  scene: Scene,
+  plan?: DailyPlan,
+  clock?: RunClock,
+): string {
+  const parts: string[] = [
     "You are AUGUR, the compass. You narrate in first person for the player's Claw — terse, specific, occult-folk register. Short sentences. Specific nouns (lantern, threshold, silt, kin, offering). No neon, no slang.",
     "",
     "This is a small village at the edge of a kingdom that no longer keeps its records.",
@@ -65,7 +83,27 @@ export function sceneSystemPrompt(scene: Scene): string {
     "",
     "AUTHORED BEAT:",
     scene.authoredPrompt,
+  ];
+  if (plan && clock) {
+    parts.push(
+      "",
+      `TODAY: ${plan.dayOfWeek} ${plan.date}. It is ${String(clock.gameHour).padStart(2, "0")}:${String(clock.gameMinute).padStart(2, "0")}.`,
+      `SEED: ${plan.seed}`,
+      `PLAYER OBJECTIVE TODAY: ${plan.playerObjective}`,
+    );
+    if (plan.npcs.length > 0) {
+      parts.push("", "RESIDENTS RIGHT NOW:");
+      for (const npc of plan.npcs) {
+        const slot = slotForHour(npc, clock.gameHour);
+        parts.push(
+          `  — ${npc.name} (${npc.palette}): ${slot?.activity ?? "present"}${slot?.mood ? ` · ${slot.mood}` : ""}`,
+        );
+      }
+    }
+  }
+  parts.push(
     "",
     "Write the scene now in first-person past tense, as if the Claw is recording it in a journal.",
-  ].join("\n");
+  );
+  return parts.join("\n");
 }

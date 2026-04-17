@@ -33,9 +33,9 @@ import {
   type ToolChoice,
   FAST,
   KIMI,
-  complete,
   toOpenAiContent,
 } from "./cf-ai.ts";
+import { complete } from "./pi-complete.ts";
 import {
   AMBIENT_TOOLS,
   type ToolEffect,

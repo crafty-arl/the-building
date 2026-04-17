@@ -7,12 +7,12 @@
   "scripts": {
     "play": "tsx src/index.ts",
     "play:debug": "DEBUG=1 tsx src/index.ts",
-    "replay": "tsx src/replay.ts"
+    "replay": "tsx src/replay.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@augur/agent": "*",
     "@mariozechner/pi-ai": "^0.67.0",
-    "@mariozechner/pi-agent-core": "^0.67.0",
-    "@sinclair/typebox": "^0.34.0",
     "dotenv": "^16.4.0"
   },
   "devDependencies": {

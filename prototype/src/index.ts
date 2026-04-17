@@ -14,37 +14,43 @@
  *   bolt-the-door       · place.bind      — durable scene fact injected as SCENE STATE
  *   ask-about-the-rain  · act.speak       — follow-up; proves place.bind + ward.vow together
  *   scry-the-lantern    · sight.scry      — render scene as PNG, hand to Kimi vision
- *
- * Success = every seam visibly does something the prior turn's LLM couldn't,
- * tree serializes cleanly, total cost prints, no errors. Momentum shows up
- * as cache-read tokens accumulating across the scene.
  */
 
 import "dotenv/config";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import {
   complete,
   completeSimple,
-  type Context,
-  type Message,
-  type Model,
+  type Context as PiContext,
+  type Message as PiMessage,
   type Api,
-  type UserMessage,
+  type Model,
   type ThinkingLevel,
+  type AssistantMessage as PiAssistantMessage,
+  type UserMessage as PiUserMessage,
 } from "@mariozechner/pi-ai";
-import { kimi, fastMind } from "./models.ts";
-import { TAVERN, STRANGER, sceneSystemPrompt } from "./scene.ts";
-import { findCard, type Card } from "./cards.ts";
-import { SessionTree } from "./tree.ts";
-import { renderTavernScenePng } from "./image.ts";
 import {
-  STORYTELLERS,
-  consultStoryteller,
   applyStorytellerEvent,
+  assistantText,
+  type AssistantMessage,
+  type Card,
+  consultStoryteller,
+  fastMind,
+  findCard,
+  kimi,
+  type Message,
+  sceneSystemPrompt,
+  SessionTree,
+  STORYTELLERS,
+  STRANGER,
+  TAVERN,
   type StorytellerArchetype,
   type StorytellerDecision,
-} from "./storyteller.ts";
+  type UserMessage,
+  type Usage,
+} from "@augur/agent";
+import { renderTavernScenePng } from "./adapters/image-png.ts";
+import { saveSessionToDisk } from "./adapters/disk-session.ts";
 
 const ACCOUNT_ID = requireEnv("CLOUDFLARE_ACCOUNT_ID");
 const API_KEY = requireEnv("CLOUDFLARE_API_KEY");
@@ -60,8 +66,6 @@ const FAST = fastMind(ACCOUNT_ID);
 
 /**
  * The Storyteller for this run. Pick one of STORYTELLERS.{aethelos|nythera|weaver|scribe}.
- * Nythera (chaos) fires often — best for demoing the seam. Aethelos (order)
- * fires rarely. Override via env AUGUR_STORYTELLER.
  */
 const STORYTELLER: StorytellerArchetype =
   STORYTELLERS[process.env.AUGUR_STORYTELLER ?? "nythera"] ??
@@ -70,11 +74,6 @@ const SCENE_OBJECTIVE =
   "learn who the Stranger is, survive the scene, leave something bound behind";
 const SCENE_MAX_TURNS = 11;
 
-/**
- * Scene-wide session id — passed to every Cloudflare call so consecutive
- * plays in the same scene get the same routing slot and prefix-cache hits.
- * This is the substrate that makes momentum.hold mean something.
- */
 const SCENE_SESSION_ID = `augur-scene-${TAVERN.id}-${Date.now()}`;
 
 const BASE_OPTS = {
@@ -91,27 +90,97 @@ function section(title: string) {
 
 function printMessage(msg: Message) {
   if (msg.role === "assistant") {
+    const text = assistantText(msg);
+    const modelTag = `\x1b[35m[${msg.provider ?? "?"}/${msg.model ?? "?"}]\x1b[0m`;
+    console.log(`${modelTag}\n\x1b[33m${text}\x1b[0m`);
+  } else if (msg.role === "user") {
     const text = msg.content
       .filter((c) => c.type === "text")
       .map((c) => ("text" in c ? c.text : ""))
       .join("");
-    const modelTag = `\x1b[35m[${msg.provider}/${msg.model}]\x1b[0m`;
-    console.log(`${modelTag}\n\x1b[33m${text}\x1b[0m`);
-  } else if (msg.role === "user") {
-    const text =
-      typeof msg.content === "string"
-        ? msg.content
-        : msg.content
-            .filter((c) => c.type === "text")
-            .map((c) => ("text" in c ? c.text : ""))
-            .join("");
-    const hasImage =
-      typeof msg.content !== "string" &&
-      msg.content.some((c) => c.type === "image");
+    const hasImage = msg.content.some((c) => c.type === "image");
     console.log(
       `\x1b[90m> ${text}${hasImage ? " [+image attached]" : ""}\x1b[0m`,
     );
   }
+}
+
+/**
+ * Convert our narrow Message (tree storage) into pi-ai's wider Message so we
+ * can feed history to complete(). Inverse of narrowAssistant().
+ */
+function toPiMessage(m: Message): PiMessage {
+  if (m.role === "user") {
+    const piUser: PiUserMessage = {
+      role: "user",
+      content: m.content.map((c) =>
+        c.type === "text"
+          ? { type: "text" as const, text: c.text }
+          : { type: "image" as const, data: c.data, mimeType: c.mimeType },
+      ),
+      timestamp: m.timestamp,
+    };
+    return piUser;
+  }
+  if (m.role === "assistant") {
+    const piAssistant: PiAssistantMessage = {
+      role: "assistant",
+      content: m.content.map((c) => ({ type: "text" as const, text: c.text })),
+      api: "openai-completions",
+      provider: (m.provider ?? "cloudflare") as PiAssistantMessage["provider"],
+      model: m.model ?? "",
+      usage: {
+        input: m.usage.input,
+        output: m.usage.output,
+        cacheRead: m.usage.cacheRead ?? 0,
+        cacheWrite: m.usage.cacheWrite ?? 0,
+        totalTokens: m.usage.input + m.usage.output,
+        cost: {
+          input: m.usage.cost.input,
+          output: m.usage.cost.output,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: m.usage.cost.total,
+        },
+      },
+      stopReason: "stop",
+      timestamp: m.timestamp,
+    };
+    return piAssistant;
+  }
+  // SystemMessage shouldn't be stored in a tree; defensive fall-through as a user beat.
+  return {
+    role: "user",
+    content: [{ type: "text", text: m.content }],
+    timestamp: m.timestamp,
+  };
+}
+
+/** Narrow pi-ai's AssistantMessage into our storage shape (text-only content). */
+function narrowAssistant(pi: PiAssistantMessage): AssistantMessage {
+  const text = pi.content
+    .filter((c): c is { type: "text"; text: string } => c.type === "text")
+    .map((c) => c.text)
+    .join("");
+  const usage: Usage = {
+    input: pi.usage.input,
+    output: pi.usage.output,
+    ...(pi.usage.cacheRead ? { cacheRead: pi.usage.cacheRead } : {}),
+    ...(pi.usage.cacheWrite ? { cacheWrite: pi.usage.cacheWrite } : {}),
+    cost: {
+      input: pi.usage.cost.input,
+      output: pi.usage.cost.output,
+      total: pi.usage.cost.total,
+    },
+  };
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    timestamp: pi.timestamp,
+    provider: pi.provider,
+    model: pi.model,
+    usage,
+  };
 }
 
 interface NarrateOpts {
@@ -125,7 +194,7 @@ interface NarrateOpts {
   extraSystem?: string;
   /** Model override — default Kimi. Fast mind used for mind.fast. */
   model?: Model<Api>;
-  /** If true, suppress the full scene system prompt and use only extraSystem. Used for mind.fast so weaker models aren't tempted to analyze the whole scene. */
+  /** If true, suppress the full scene system prompt and use only extraSystem. */
   minimalSystem?: boolean;
   /** Max output tokens cap for this turn. */
   maxTokens?: number;
@@ -149,7 +218,7 @@ async function narrate(opts: NarrateOpts): Promise<void> {
       role: "user",
       content,
       timestamp: Date.now(),
-    } as UserMessage);
+    });
   }
 
   const factsBlock = opts.tree.renderFacts();
@@ -157,20 +226,19 @@ async function narrate(opts: NarrateOpts): Promise<void> {
   if (!opts.minimalSystem) systemParts.push(opts.systemPrompt);
   if (factsBlock && !opts.minimalSystem) systemParts.push(factsBlock);
   // Pull any pending storyteller injection into this turn's system prompt.
-  // One-shot: it's cleared after use so the next turn starts fresh.
   if (pendingStorytellerInjection && !opts.minimalSystem) {
     systemParts.push(pendingStorytellerInjection);
     pendingStorytellerInjection = null;
   }
   if (opts.extraSystem) systemParts.push(opts.extraSystem);
-  const context: Context = {
+
+  const historyMessages: Message[] = opts.minimalSystem
+    ? newMessages
+    : [...opts.tree.getBranchMessages(), ...newMessages];
+
+  const context: PiContext = {
     systemPrompt: systemParts.join("\n\n"),
-    // Fast-mind turns run on a stripped context too — the rich message history
-    // triggers weaker models into "analyze the whole scene" mode. For mind.fast
-    // we give just the card prompt, no prior turns.
-    messages: opts.minimalSystem
-      ? newMessages
-      : [...opts.tree.getBranchMessages(), ...newMessages],
+    messages: historyMessages.map(toPiMessage),
   };
 
   const leaf = opts.tree.getLeaf();
@@ -184,21 +252,19 @@ async function narrate(opts: NarrateOpts): Promise<void> {
     ...(opts.maxTokens ? { maxTokens: opts.maxTokens } : {}),
     ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
   };
-  const assistant = opts.reasoning
+  const piAssistant = opts.reasoning
     ? await completeSimple(model, context, callOpts)
     : await complete(model, context, callOpts);
 
-  // Belt-and-suspenders: weaker models on Cloudflare leak chain-of-thought
-  // preambles ("Draft:", "Key constraints:", "Word count:"). Strip them so
-  // downstream seams (memory.recall, context) don't inherit the garbage.
-  if (opts.minimalSystem) {
-    cleanPreamble(assistant);
-  }
+  // Narrow pi-ai shape → storage shape (strip thinking/tool-calls).
+  const assistant = narrowAssistant(piAssistant);
+
+  // Belt-and-suspenders: weaker models leak chain-of-thought preambles. Strip them.
+  if (opts.minimalSystem) cleanPreamble(assistant);
 
   newMessages.push(assistant);
   printMessage(assistant);
 
-  // Momentum observability: if the provider returned any cache hits, show them.
   const u = assistant.usage;
   if (u.cacheRead || u.cacheWrite) {
     console.log(
@@ -217,38 +283,28 @@ async function narrate(opts: NarrateOpts): Promise<void> {
 
 /**
  * Strip chain-of-thought preambles from an assistant message in place.
- * Cloudflare-hosted Gemma/Llama models leak planning text like
- * "Key constraints:", "Draft:", "Word count:" even when instructed not to.
- * Heuristic: if we see a leaked label, take the LAST draft block and keep it.
  */
 function cleanPreamble(msg: Message): void {
   if (msg.role !== "assistant") return;
   for (const c of msg.content) {
     if (c.type !== "text") continue;
     let t = c.text;
-    // Find the last occurrence of a "draft:" / "refining:" / "final:" label
-    // and take what follows, up to the next meta-label.
-    const draftMatch = t.match(/(?:Refining|Final|Draft|Output):\s*\n+([\s\S]+?)(?:\n\s*\n(?:Word count|Check constraints?|Check:|Refining|Meta|Note|Verify|Analysis)\b[\s\S]*)?$/i);
+    const draftMatch = t.match(
+      /(?:Refining|Final|Draft|Output):\s*\n+([\s\S]+?)(?:\n\s*\n(?:Word count|Check constraints?|Check:|Refining|Meta|Note|Verify|Analysis)\b[\s\S]*)?$/i,
+    );
     if (draftMatch) {
       t = draftMatch[1].trim();
     } else {
-      // Drop common preamble intro lines
       t = t
         .replace(/^(?:The user (?:plays|instructs|has instructed)[^\n]*\n+)/i, "")
         .replace(/^(?:Key constraints?:|Constraints?:)[\s\S]*?(?=\n\n|\n[A-Z])/i, "")
         .trim();
-      // Drop trailing meta blocks
       t = t.replace(/\n+(?:Word count|Check constraints?|Check:|Meta|Note|Verify|Analysis)\b[\s\S]*$/i, "").trim();
     }
     c.text = t;
   }
 }
 
-/**
- * Pending injection from the Storyteller. When an event fires, we store
- * the narration here so the next narrate() call can weave it in as
- * STORYTELLER EVENT: ... This is cleared once consumed.
- */
 let pendingStorytellerInjection: string | null = null;
 const storytellerLog: Array<{ turn: number; decision: StorytellerDecision }> = [];
 
@@ -284,9 +340,7 @@ async function storytellerPhase(opts: {
   console.log(
     `${tag} \x1b[38;5;213m› FIRE · ${decision.event.type}\x1b[0m`,
   );
-  console.log(
-    `${tag} \x1b[37m  "${decision.event.narration}"\x1b[0m`,
-  );
+  console.log(`${tag} \x1b[37m  "${decision.event.narration}"\x1b[0m`);
   for (const a of applied) console.log(`${tag} \x1b[90m  ${a}\x1b[0m`);
 
   pendingStorytellerInjection = [
@@ -450,10 +504,7 @@ async function main() {
   let recalledText = "";
   const asst = recallTarget.messages.find((m) => m.role === "assistant");
   if (asst && asst.role === "assistant") {
-    recalledText = asst.content
-      .filter((c) => c.type === "text")
-      .map((c) => ("text" in c ? c.text : ""))
-      .join("");
+    recalledText = assistantText(asst);
   }
   console.log(
     `\x1b[90m  › recalling entry ${recallTarget.id} (label='${cRecall.recall!.entryLabel}'): "${recalledText.slice(0, 80).replace(/\n/g, " ")}..."\x1b[0m\n`,
@@ -510,7 +561,7 @@ async function main() {
       "Claw vowed silence and bolted the door from inside. The room is sealed.",
   });
 
-  // ─── turn 10 ─── act.speak ─── follow-up, proves place.bind + ward.vow together
+  // ─── turn 10 ─── act.speak ─── follow-up
   const c5 = findCard("ask-about-the-rain");
   headerFor(c5, "−1 footstep");
   console.log(
@@ -524,7 +575,7 @@ async function main() {
     label: "small-talk",
   });
 
-  // ─── turn 11 ─── sight.scry ─── render scene as PNG, hand to Kimi vision
+  // ─── turn 11 ─── sight.scry
   const cSight = findCard("scry-the-lantern");
   headerFor(cSight, "−2 footsteps");
   const pngB64 = renderTavernScenePng({
@@ -554,12 +605,10 @@ async function main() {
   section("SESSION TREE");
   console.log(tree.render());
 
-  // ─── serialize ─── save the full tree so it can be replayed without LLM calls
   const savePath = resolve(
     process.env.AUGUR_SAVE_PATH ?? `./sessions/${SCENE_SESSION_ID}.json`,
   );
-  mkdirSync(dirname(savePath), { recursive: true });
-  writeFileSync(savePath, JSON.stringify(tree.toJSON(SCENE_SESSION_ID), null, 2));
+  saveSessionToDisk(tree, SCENE_SESSION_ID, savePath);
 
   section("COST");
   const total = tree.totalUsage();
