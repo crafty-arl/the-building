@@ -16,6 +16,7 @@ describe("proceduralRoomPlan", () => {
     // LLM against — proves the fallback can never accidentally drift out of
     // spec relative to the LLM contract.
     const reshaped = {
+      name: plan.name,
       tilemap: plan.tilemap,
       floorY: plan.floorY,
       anchors: plan.anchors,
@@ -47,11 +48,40 @@ describe("proceduralRoomPlan", () => {
     const b = proceduralRoomPlan("a kitchen at dawn", "2026-04-17", "Friday");
     expect(a.tilemap).toEqual(b.tilemap);
     expect(a.anchors).toEqual(b.anchors);
+    expect(a.name).toBe(b.name);
+    expect(a.npcs.map((n) => n.name)).toEqual(b.npcs.map((n) => n.name));
+  });
+
+  it("gives distinct premises distinct names and casts", () => {
+    const a = proceduralRoomPlan(
+      "In the sealed attic, a candle is burning too fast.",
+      "2026-04-17",
+      "Friday",
+    );
+    const b = proceduralRoomPlan(
+      "A boatwright's shed full of unfinished keels.",
+      "2026-04-17",
+      "Friday",
+    );
+    expect(a.name).not.toBe(b.name);
+    expect(a.npcs.map((n) => n.name).join(",")).not.toBe(
+      b.npcs.map((n) => n.name).join(","),
+    );
+  });
+
+  it("extracts the room name from a 'In the X' premise prefix", () => {
+    const plan = proceduralRoomPlan(
+      "In the sealed attic, a candle is burning too fast.",
+      "2026-04-17",
+      "Friday",
+    );
+    expect(plan.name.toLowerCase()).toContain("sealed attic");
   });
 });
 
 describe("RoomPlanSchema", () => {
   const validBase = {
+    name: "The Sealed Attic",
     tilemap: [
       "####################",
       "#..................#",

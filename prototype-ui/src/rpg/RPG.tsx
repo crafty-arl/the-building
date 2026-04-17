@@ -455,10 +455,10 @@ export function RPG() {
   const [llmFallbackReason, setLlmFallbackReason] = useState<string | null>(null);
   const [roomPrompt, setRoomPrompt] = useState("");
   const [directive, setDirective] = useState("");
-  const [roomProgress, setRoomProgress] = useState<{
-    pct: number;
-    stage: string;
-  } | null>(null);
+  // `null` when idle. When a floor is loading, we only need to know
+  // that loading is active — the individual signal states are derived
+  // in the render from hearth.status / hearth.hello / state.scene.id.
+  const [roomLoading, setRoomLoading] = useState<{ startedAt: number } | null>(null);
   const [showNewRoomForm, setShowNewRoomForm] = useState(false);
   const [selectedIngredients, setSelectedIngredients] = useState<string[]>([]);
   const [selectedSurvivors, setSelectedSurvivors] = useState<string[]>([]);
@@ -470,7 +470,10 @@ export function RPG() {
     setLlmFallbackReason(null);
     const now = performance.now();
 
-    setRoomProgress({ pct: 10, stage: "waking the room…" });
+    // Kick off the signal-check overlay. Individual signal states
+    // (UPLINK / HANDSHAKE / WEAVE / STAGE) are derived in-render from
+    // real hearth milestones; this ref just marks that loading is live.
+    setRoomLoading({ startedAt: performance.now() });
 
     try {
       // Every floor lives inside the building — materialize one if the player
@@ -493,7 +496,15 @@ export function RPG() {
       live.roomId = newRoomId();
       live.roomPrompt = prompt;
       live.buildingId = bld.id;
-      live.floorIndex = bld.floors.length;
+      // New floors stack above existing ones in the same building: sealed
+      // floors + any in-progress rooms already saved for this building.
+      // Without this, every unsealed IGNITE got floorIndex=0 and rendered
+      // as another "FLOOR 1" in parallel instead of floor 2, 3, …
+      const sealedIds = new Set(bld.floors.map((f) => f.id));
+      const activeForBld = listRooms().filter(
+        (r) => r.buildingId === bld.id && !sealedIds.has(r.id),
+      ).length;
+      live.floorIndex = bld.floors.length + activeForBld;
       live.inheritedMemory = buildInheritedMemory(bld);
       live.simStartedAt = now;
       live.lastAmbient = now;
@@ -524,13 +535,11 @@ export function RPG() {
       // from CURRENT_KEY on its first connect attempt (otherwise it races
       // the tick loop's autosave and can connect with a stale roomId).
       saveState(live);
-      setRoomProgress({ pct: 100, stage: "connecting…" });
-      window.setTimeout(() => setRoomProgress(null), 500);
       setSelectedIngredients([]);
       setSelectedSurvivors([]);
     } catch (e) {
       setLlmFallbackReason(e instanceof Error ? e.message : String(e));
-      setRoomProgress(null);
+      setRoomLoading(null);
     } finally {
       setNarratorThinking(false);
       setState({ ...stateRef.current });
@@ -663,8 +672,14 @@ export function RPG() {
       return null;
     }
   }, []);
+  // Enable Hearth during active loading too — the WS must start
+  // connecting the moment IGNITE fires so the user sees real progress
+  // (connecting → open → hello → scene) while still on the card-picking
+  // page. Without this, the loading bar would only start moving after
+  // the phase flip, which now happens at scene projection.
   const hearth = useHearth({
-    enabled: state.phase === "playing",
+    enabled: state.phase === "playing" || !!roomLoading,
+    roomId: state.roomId || null,
     inviteToken: urlInviteToken,
   });
 
@@ -685,9 +700,38 @@ export function RPG() {
     const live = stateRef.current;
     applyScene(live, scene);
     if (characters.length > 0) live.characters = characters;
+    // Clear the bootstrap "Waking the room…" typewriter now that the real
+    // scene has landed — real agent narration will replace it.
+    live.pending = null;
+    live.narrationQueue = [];
+    // Now flip into the playing phase. The loading overlay has been held
+    // over the card-picking page until this moment; the view transitions
+    // to the canvas with the room already renderable.
+    if (live.phase !== "playing") {
+      const now = performance.now();
+      live.phase = "playing";
+      live.simStartedAt = now;
+      live.lastAmbient = now;
+    }
     projectedSceneIdRef.current = wireSceneId;
     setState({ ...live });
   }, [hearth.hello]);
+
+  // Clear the signal-check overlay once the scene has landed. Until
+  // then the signals are computed in-render from hearth.status /
+  // hearth.hello / state.scene.id, no intermediate state required.
+  const loadingActive = !!roomLoading;
+  useEffect(() => {
+    if (!loadingActive) return;
+    const wantedSceneId = hearth.hello?.scene?.id ?? null;
+    const sceneReady =
+      !!wantedSceneId && state.scene?.id === wantedSceneId;
+    if (!sceneReady) return;
+    // Hold the "LAUNCH" flash one beat so the final light isn't a jump
+    // cut before the room view takes over.
+    const t = window.setTimeout(() => setRoomLoading(null), 450);
+    return () => window.clearTimeout(t);
+  }, [loadingActive, state.scene?.id, hearth.hello]);
 
   // Mid-day spawns: incrementally append a Character for each newly
   // arrived NPC without resetting existing characters' motion state.
@@ -731,6 +775,22 @@ export function RPG() {
       stateRef.current = loaded;
       resetCodaFlag();
       setState({ ...loaded });
+    };
+
+    const onDeleteRoom = (saved: SavedRoom) => {
+      if (!window.confirm(`Delete floor "${saved.snapshot.scene.name || saved.name}"? This cannot be undone.`)) {
+        return;
+      }
+      deleteRoom(saved.id);
+      // If the deleted room was the building's active one, clear the
+      // pointer so the building view doesn't try to highlight a ghost.
+      if (building && building.activeRoomId === saved.id) {
+        const cleared = { ...building, activeRoomId: null };
+        setBuilding(cleared);
+        void saveBuilding(cleared);
+      }
+      setLibraryTick((t) => t + 1);
+      flashToast("floor deleted");
     };
 
     const onRegenerateRoom = (saved: SavedRoom) => {
@@ -911,41 +971,41 @@ export function RPG() {
           </div>
 
           <div className="rp-ingr-foot">
-            {roomProgress ? (
-              <div className="rp-progress" role="status" aria-live="polite">
-                <div className="rp-progress-label">{roomProgress.stage}</div>
-                <div className="rp-progress-bar"><div className="rp-progress-fill" style={{ width: `${roomProgress.pct}%` }} /></div>
-                <div className="rp-progress-pct">{roomProgress.pct}%</div>
-              </div>
-            ) : (
-              <>
-                <div className="rp-prompt-mini">
-                  <textarea
-                    className="rp-prompt-text"
-                    placeholder="your prompt appears here — or write your own"
-                    value={roomPrompt}
-                    onChange={(e) => setRoomPrompt(e.target.value)}
-                    disabled={narratorThinking}
-                    spellCheck={false}
-                    rows={1}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className="rp-ignite"
-                  onClick={() => void onGenerateRoom()}
-                  disabled={narratorThinking || !roomPrompt.trim()}
-                >
-                  <span className="rp-ignite-label">
-                    <span className="rp-ignite-title">IGNITE</span>
-                    <span className="rp-ignite-sub">
-                      {narratorThinking ? "composing…" : building ? `open floor ${building.floors.length + 1}` : "open floor"}
-                    </span>
-                  </span>
-                  <span className="rp-ignite-badge">⟶</span>
-                </button>
-              </>
-            )}
+            <div className="rp-prompt-mini">
+              <textarea
+                className="rp-prompt-text"
+                placeholder="your prompt appears here — or write your own"
+                value={roomPrompt}
+                onChange={(e) => setRoomPrompt(e.target.value)}
+                disabled={narratorThinking || !!roomLoading}
+                spellCheck={false}
+                rows={1}
+              />
+            </div>
+            <button
+              type="button"
+              className="rp-ignite"
+              onClick={() => void onGenerateRoom()}
+              disabled={narratorThinking || !!roomLoading || !roomPrompt.trim()}
+            >
+              <span className="rp-ignite-label">
+                <span className="rp-ignite-title">IGNITE</span>
+                <span className="rp-ignite-sub">
+                  {narratorThinking
+                    ? "composing…"
+                    : building
+                    ? (() => {
+                        const sealedIds = new Set(building.floors.map((f) => f.id));
+                        const activeForBld = listRooms().filter(
+                          (r) => r.buildingId === building.id && !sealedIds.has(r.id),
+                        ).length;
+                        return `open floor ${building.floors.length + activeForBld + 1}`;
+                      })()
+                    : "open floor"}
+                </span>
+              </span>
+              <span className="rp-ignite-badge">⟶</span>
+            </button>
             {llmFallbackReason && (
               <p className="rp-fallback-banner" style={{ margin: 0 }}>narrator offline — using notes ({llmFallbackReason})</p>
             )}
@@ -956,10 +1016,22 @@ export function RPG() {
       );
     }
 
-    // Building home / tower view
-    const activeRoom = building?.activeRoomId
-      ? rooms.find((r) => r.id === building.activeRoomId) ?? null
-      : null;
+    // Building home / tower view — render every unsealed floor in this
+    // building, not just `activeRoomId`. Otherwise the header can say
+    // "5 FLOORS" while the list only shows one active card + sealed ones,
+    // because prior unsealed rooms get orphaned from view.
+    const sealedIdSet = new Set(building?.floors.map((f) => f.id) ?? []);
+    const unsealedRoomsForBld = building
+      ? rooms
+          .filter(
+            (r) => r.buildingId === building.id && !sealedIdSet.has(r.id),
+          )
+          .sort(
+            (a, b) =>
+              (b.snapshot.floorIndex ?? 0) - (a.snapshot.floorIndex ?? 0),
+          )
+      : [];
+    const activeRoomId = building?.activeRoomId ?? null;
 
     return (
       <div className="rp-building">
@@ -975,8 +1047,12 @@ export function RPG() {
             <div className="rp-building-stats">
               {building ? (() => {
                 const sealed = building.floors.length;
-                const hasActive = !!building.activeRoomId;
-                const totalFloors = sealed + (hasActive ? 1 : 0);
+                const sealedIds = new Set(building.floors.map((f) => f.id));
+                const activeRooms = rooms.filter(
+                  (r) => r.buildingId === building.id && !sealedIds.has(r.id),
+                );
+                const hasActive = activeRooms.length > 0;
+                const totalFloors = sealed + activeRooms.length;
                 const survivorCount = building.roster.length;
                 const chapters = building.progress?.chapters ?? 0;
                 const seasonName = building.progress?.season.name ?? "";
@@ -985,7 +1061,7 @@ export function RPG() {
                     <span>{totalFloors} {totalFloors === 1 ? "FLOOR" : "FLOORS"}</span>
                     {hasActive && (<>
                       <span className="sep" />
-                      <span className="streak">FLOOR {sealed + 1} LIVE</span>
+                      <span className="streak">FLOOR {totalFloors} LIVE</span>
                     </>)}
                     <span className="sep" />
                     <span>{survivorCount} {survivorCount === 1 ? "SURVIVOR" : "SURVIVORS"}</span>
@@ -1044,25 +1120,34 @@ export function RPG() {
               <span className="rp-roof-btn">+</span>
             </button>
 
-            {activeRoom && (() => {
-              const archived = isArchivedRoom(activeRoom);
-              const canRegen = archived && !!(activeRoom.prompt && activeRoom.prompt.trim());
+            {unsealedRoomsForBld.map((room) => {
+              const archived = isArchivedRoom(room);
+              const canRegen = archived && !!(room.prompt && room.prompt.trim());
+              const isLive = room.id === activeRoomId;
+              const floorNum =
+                (room.snapshot.floorIndex ?? building.floors.length) + 1;
               return (
-                <div className={`rp-floor is-active ${archived ? "is-archived" : ""}`} role="listitem">
-                  <div className="rp-floor-num">{building.floors.length + 1}</div>
+                <div
+                  key={room.id}
+                  className={`rp-floor is-active ${archived ? "is-archived" : ""} ${isLive ? "is-live" : ""}`}
+                  role="listitem"
+                >
+                  <div className="rp-floor-num">{floorNum}</div>
                   <div className="rp-floor-body">
-                    <MiniRoomCanvas room={activeRoom} />
+                    <MiniRoomCanvas room={room} />
                     <div className="rp-floor-info">
-                      <div className="rp-floor-name">{activeRoom.snapshot.scene.name || activeRoom.name}</div>
+                      <div className="rp-floor-name">{room.snapshot.scene.name || room.name}</div>
                       {archived ? (
                         <div className="rp-floor-status" style={{ color: "var(--ink-dim)" }}>
                           ARCHIVED FLOOR — TOP-DOWN LAYOUT
                         </div>
                       ) : (
-                        <div className="rp-floor-status">IN PROGRESS · TENSION {Math.round(activeRoom.snapshot.tension)}</div>
+                        <div className="rp-floor-status">
+                          {isLive ? "LIVE · " : "IN PROGRESS · "}TENSION {Math.round(room.snapshot.tension)}
+                        </div>
                       )}
                       <div className="rp-floor-cast">
-                        {activeRoom.snapshot.characters.filter((c) => !c.transient && !c.dead).map((c) => (
+                        {room.snapshot.characters.filter((c) => !c.transient && !c.dead).map((c) => (
                           <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                             <span className="dot" style={{ background: c.palette.cloak }} />
                             {c.name}
@@ -1070,30 +1155,39 @@ export function RPG() {
                         ))}
                       </div>
                     </div>
-                    {archived ? (
-                      canRegen ? (
-                        <button
-                          type="button"
-                          className="rp-floor-enter"
-                          onClick={() => onRegenerateRoom(activeRoom)}
-                          title="Rebuild this floor as a side-elevation layout"
-                        >REGENERATE ›</button>
+                    <div className="rp-floor-actions">
+                      {archived ? (
+                        canRegen ? (
+                          <button
+                            type="button"
+                            className="rp-floor-enter"
+                            onClick={() => onRegenerateRoom(room)}
+                            title="Rebuild this floor as a side-elevation layout"
+                          >REGENERATE ›</button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rp-floor-enter"
+                            disabled
+                            title="No original prompt saved — delete from localStorage to start fresh"
+                            style={{ opacity: 0.5, cursor: "not-allowed" }}
+                          >NO PROMPT</button>
+                        )
                       ) : (
-                        <button
-                          type="button"
-                          className="rp-floor-enter"
-                          disabled
-                          title="No original prompt saved — delete from localStorage to start fresh"
-                          style={{ opacity: 0.5, cursor: "not-allowed" }}
-                        >NO PROMPT</button>
-                      )
-                    ) : (
-                      <button type="button" className="rp-floor-enter" onClick={() => onEnterRoom(activeRoom.id)}>ENTER ›</button>
-                    )}
+                        <button type="button" className="rp-floor-enter" onClick={() => onEnterRoom(room.id)}>ENTER ›</button>
+                      )}
+                      <button
+                        type="button"
+                        className="rp-floor-delete"
+                        onClick={() => onDeleteRoom(room)}
+                        aria-label="Delete floor"
+                        title="Delete this floor"
+                      >×</button>
+                    </div>
                   </div>
                 </div>
               );
-            })()}
+            })}
 
             {building.floors.slice().reverse().map((floor, ri) => (
               <FloorCard key={floor.id} floor={floor} floorNum={building.floors.length - ri} />
@@ -1312,9 +1406,109 @@ export function RPG() {
   const inPlay = state.phase === "playing";
   const spentNow = state.phase === "playing" && state.tension >= 100;
   const liveCast = state.characters.filter((c) => !c.transient && !c.dead);
+  const nextFloorNum = (() => {
+    if (state.floorIndex >= 0) return state.floorIndex + 1;
+    if (building) {
+      const sealedIds = new Set(building.floors.map((f) => f.id));
+      const activeForBld = listRooms().filter(
+        (r) => r.buildingId === building.id && !sealedIds.has(r.id),
+      ).length;
+      return building.floors.length + activeForBld + 1;
+    }
+    return 1;
+  })();
   return (
     <>
       {viewNode}
+
+      {roomLoading && (() => {
+        const helloIn = !!hearth.hello;
+        const wantedSceneId = hearth.hello?.scene?.id ?? null;
+        const sceneIn =
+          !!wantedSceneId && state.scene?.id === wantedSceneId;
+        type Light = "done" | "active" | "pending" | "retry";
+        const uplink: Light =
+          helloIn || hearth.status === "open"
+            ? "done"
+            : hearth.status === "connecting"
+              ? "active"
+              : hearth.status === "error" || hearth.status === "closed"
+                ? "retry"
+                : "active";
+        const handshake: Light = helloIn
+          ? "done"
+          : hearth.status === "open"
+            ? "active"
+            : "pending";
+        const weave: Light = sceneIn
+          ? "done"
+          : helloIn
+            ? "active"
+            : "pending";
+        const stage: Light = sceneIn ? "done" : "pending";
+        const allGreen = sceneIn;
+        const signals: { key: string; label: string; note: string; light: Light }[] = [
+          { key: "alloc", label: "ALLOC FLOOR", note: "locked", light: "done" },
+          {
+            key: "uplink",
+            label: "POLL UPLINK",
+            note:
+              uplink === "done"
+                ? "locked"
+                : uplink === "retry"
+                  ? "retrying…"
+                  : "polling for connection…",
+            light: uplink,
+          },
+          {
+            key: "handshake",
+            label: "AWAIT SIGNAL",
+            note:
+              handshake === "done"
+                ? "received"
+                : handshake === "active"
+                  ? "listening…"
+                  : "—",
+            light: handshake,
+          },
+          {
+            key: "weave",
+            label: "WEAVE ROOM",
+            note:
+              weave === "done"
+                ? "ready"
+                : weave === "active"
+                  ? "drawing walls…"
+                  : "—",
+            light: weave,
+          },
+          {
+            key: "stage",
+            label: "STAGE CAST",
+            note: stage === "done" ? "ready" : "—",
+            light: stage,
+          },
+        ];
+        return (
+          <div className="rp-room-loading" role="status" aria-live="polite">
+            <div className="rp-room-loading-card">
+              <div className="rp-room-loading-title">
+                FLOOR {nextFloorNum} · {allGreen ? "LAUNCH" : "CHECKING SIGNALS"}
+              </div>
+              <ul className="rp-signals">
+                {signals.map((s) => (
+                  <li key={s.key} className={`rp-signal is-${s.light}`}>
+                    <span className="rp-signal-light" aria-hidden="true" />
+                    <span className="rp-signal-label">{s.label}</span>
+                    <span className="rp-signal-dots" aria-hidden="true" />
+                    <span className="rp-signal-note">{s.note}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        );
+      })()}
 
       <StageConsole
         hello={hearth.hello}

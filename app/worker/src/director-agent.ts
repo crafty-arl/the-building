@@ -43,7 +43,7 @@ const DEFAULT_ARCHETYPE_ID: keyof typeof STORYTELLERS = "weaver";
 const MIN_CADENCE_SEC = 5;
 const MAX_CADENCE_SEC = 600;
 const DEFAULT_CADENCE_SEC = 60;
-const MAX_TOKENS = 2000;
+const MAX_TOKENS = 4000;
 const RECENT_EVENTS_WINDOW = 14;
 
 const ACTION_TYPES = new Set([

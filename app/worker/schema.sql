@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS game_state (
   data        TEXT NOT NULL,
   version     INTEGER NOT NULL DEFAULT 1,
   updated_at  INTEGER NOT NULL,
+  locked_by   TEXT,
+  locked_at   INTEGER,
   PRIMARY KEY (user_id, entity_type, entity_id)
 );
 CREATE INDEX IF NOT EXISTS idx_game_state_user ON game_state(user_id);
