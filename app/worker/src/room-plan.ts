@@ -248,17 +248,22 @@ export async function generateRoomPlan(
   env: { AI: AiBinding },
   dateIso: string,
   roomPrompt?: string,
+  inheritedMemory?: string,
 ): Promise<RoomPlan> {
   const dayOfWeek = dayOfWeekName(dateIso);
   const premise = roomPrompt && roomPrompt.trim()
     ? roomPrompt.trim()
     : "a quiet inn / tavern at the edge of a kingdom";
+  const memoryLine = inheritedMemory && inheritedMemory.trim()
+    ? `Continuity from earlier floors in this building (treat this floor as the next chapter — let these events shape mood, objects, and NPCs, but don't restate them):\n${inheritedMemory.trim()}`
+    : "";
   const userPrompt = [
     `Room premise: ${premise}.`,
+    memoryLine,
     `Date: ${dateIso} (${dayOfWeek}).`,
     `Open hours: ${OPENING_HOUR}:00 — ${CLOSING_HOUR}:00.`,
     `Generate the room. Return STRICT JSON only.`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   try {
     const ai = (await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
