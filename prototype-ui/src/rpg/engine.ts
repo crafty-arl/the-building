@@ -51,7 +51,13 @@ export interface CardDef {
 export type Tool =
   | { op: "narrate"; text: string }
   | { op: "speak"; charId: CharId; text: string }
-  | { op: "walk"; charId: CharId; toAnchor: string }
+  | {
+      op: "walk";
+      charId: CharId;
+      toAnchor: string;
+      intent?: "toward" | "away_from" | "near";
+      fromAnchor?: string;
+    }
   | { op: "emote"; charId: CharId; kind: EmoteKind; ms?: number }
   | { op: "face"; charId: CharId; facing: Facing }
   | { op: "wait"; ms: number }
@@ -783,6 +789,34 @@ export const SCENES: Record<string, Scene> = {
 
 export const TILE_PX = 44;
 
+// Visible band around the floor row. A side-elevation room in this game is
+// typically much wider than it is tall; we don't want to letterbox the whole
+// map into the canvas when most of the rows above the floor are just air.
+// Instead, frame the camera on a "room band" — a fixed number of ceiling
+// rows above the floor and a small foundation strip below — and fit that
+// band to the canvas height. Horizontal scroll still follows the active
+// character within world bounds.
+export interface SceneBand {
+  topRow: number;     // inclusive
+  bottomRow: number;  // exclusive
+  bandPx: number;     // band height in world pixels
+  zoom: number;       // uniform zoom that fits the band to `drawHeight`
+}
+export function computeSceneBand(
+  scene: { map: string[]; floor_y: number },
+  drawHeight: number,
+  ceilingRows: number = 6,
+  foundationRows: number = 1,
+): SceneBand {
+  const rows = scene.map.length;
+  const topRow = Math.max(0, scene.floor_y - ceilingRows);
+  const bottomRow = Math.min(rows, scene.floor_y + 1 + foundationRows);
+  const bandRows = Math.max(1, bottomRow - topRow);
+  const bandPx = bandRows * TILE_PX;
+  const zoom = drawHeight > 0 && bandPx > 0 ? drawHeight / bandPx : 1;
+  return { topRow, bottomRow, bandPx, zoom };
+}
+
 // Phaser-style horizontal camera: deadzone + lerp + bounds clamp. Pure math
 // so RPG.tsx and tests share the same implementation. `viewportW` is the
 // CSS-pixel width of the canvas container; `worldW` is the world pixel width
@@ -1508,19 +1542,49 @@ export function tickCharacters(s: GameState, now: number, dt: number) {
     }
     const dir = c.path.toX > c.path.fromX ? 1 : -1;
     // Occupancy check: if another live character is within half a tile in
-    // the direction we're walking, stall for a short while then give up.
-    const occupied = s.characters.some((o) => {
+    // the direction we're walking, stall briefly then nudge the blocker
+    // out of the way so the story can keep moving.
+    const ahead = c.pos.x + dir * 0.5;
+    const blocker = s.characters.find((o) => {
       if (o.id === c.id || o.dead) return false;
-      const ahead = c.pos.x + dir * 0.5;
       return Math.abs(o.pos.x - ahead) < 0.55 && Math.abs(o.pos.y - c.pos.y) < 0.6;
     });
-    if (occupied) {
+    if (blocker) {
       const blockedFor = s.blockedAt[c.id] ?? now;
       s.blockedAt[c.id] = blockedFor;
       if (now - blockedFor > 1500) {
-        c.path = null;
-        c.moving = false;
-        delete s.blockedAt[c.id];
+        // Step the blocker BEHIND the walker (opposite the walker's dir)
+        // so the lane ahead clears. Fall back to cancelling the walk only
+        // if there's no walkable column behind us either.
+        const behindTarget = Math.round(c.pos.x - dir * 1);
+        const aside = standingX(s.scene, behindTarget);
+        const asideFree = !s.characters.some(
+          (o) => o.id !== blocker.id && !o.dead && Math.abs(o.pos.x - aside) < 0.55,
+        );
+        if (asideFree && aside !== Math.round(blocker.pos.x)) {
+          blocker.pos.x = aside;
+          blocker.path = null;
+          blocker.moving = false;
+          blocker.facing = facingFromDx(aside - c.pos.x, blocker.facing);
+          const walkerGoal = c.goal ?? `x${Math.round(c.path.toX)}`;
+          logAction(
+            s,
+            `[blocked] ${c.name} → ${walkerGoal} (${blocker.name} in path; nudged aside)`,
+            now,
+          );
+          delete s.blockedAt[c.id];
+        } else {
+          // Nowhere to nudge — give up and log so the director sees it.
+          const walkerGoal = c.goal ?? `x${Math.round(c.path.toX)}`;
+          logAction(
+            s,
+            `[blocked] ${c.name} → ${walkerGoal} (${blocker.name} in path; no room to nudge)`,
+            now,
+          );
+          c.path = null;
+          c.moving = false;
+          delete s.blockedAt[c.id];
+        }
       } else {
         c.moving = false;
       }
@@ -3264,7 +3328,10 @@ export async function fetchDirective(
       objective: c.objective || undefined,
       motive: c.motive || undefined,
     })),
-    anchors: Object.keys(s.scene.anchors),
+    anchors: Object.entries(s.scene.anchors).map(([name, a]) => ({
+      name,
+      x: a.x,
+    })),
     recent,
     flags: s.flags,
     tension: Math.round(s.tension),

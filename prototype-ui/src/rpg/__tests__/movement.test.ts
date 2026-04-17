@@ -31,10 +31,10 @@ function makeScene(): Scene {
   };
 }
 
-function makeChar(x: number, floorY: number): Character {
+function makeChar(x: number, floorY: number, id = "marrow", name = "Marrow"): Character {
   return {
-    id: "marrow",
-    name: "Marrow",
+    id,
+    name,
     description: "",
     pos: { x, y: floorY },
     facing: "right",
@@ -100,5 +100,66 @@ describe("walkTo / tickCharacters", () => {
     s.characters = [c];
     tickCharacters(s, 0, 1 / 60);
     expect(c.pos.y).toBe(s.scene.floor_y);
+  });
+});
+
+describe("occupancy deadlock handling", () => {
+  it("nudges a blocker aside after the 1500ms stall and logs a [blocked] action", () => {
+    const s: GameState = initialState(0);
+    s.scene = makeScene();
+    const walker = makeChar(13, s.scene.floor_y, "marrow", "Kaida");
+    const blocker = makeChar(12, s.scene.floor_y, "soren", "Caspian");
+    s.characters = [walker, blocker];
+
+    walkTo(s.scene, walker, 10, 0);
+    // First tick: the stall timer starts.
+    tickCharacters(s, 0, 1 / 60);
+    expect(walker.path).not.toBeNull();
+    expect(walker.pos.x).toBeCloseTo(13, 3);
+
+    // Advance past the 1500ms grace window — blocker should be nudged
+    // BEHIND the walker (opposite dir) so the lane ahead clears.
+    tickCharacters(s, 1800, 1 / 60);
+
+    const logTexts = s.log.map((l) => l.text);
+    expect(logTexts.some((t) => t.startsWith("[blocked]"))).toBe(true);
+    // Blocker moved behind walker (walker is at 13 going left, so blocker
+    // should step to a column > walker — x=14).
+    expect(blocker.pos.x).toBeGreaterThan(walker.pos.x);
+    expect(walker.path).not.toBeNull(); // walker's path preserved
+  });
+
+  it("cancels the walk and logs when neither side has room to nudge", () => {
+    // Tiny 5-wide scene so the blocker can't step aside.
+    const cols = 5;
+    const rows = 6;
+    const floor_y = 4;
+    const wall = "#".repeat(cols);
+    const air = "#" + ".".repeat(cols - 2) + "#";
+    const map: string[] = [];
+    for (let y = 0; y < rows; y++) map.push(y === 0 || y === rows - 1 ? wall : air);
+    const s: GameState = initialState(0);
+    s.scene = {
+      id: "tight",
+      name: "tight",
+      map,
+      floor_y,
+      anchors: { center: { x: 2, y: floor_y } },
+      starts: {} as Scene["starts"],
+      schedules: {} as Scene["schedules"],
+    };
+    // Walker at x=3 walking left; blocker at x=2; third char at x=1 so
+    // the blocker has nowhere to step behind the walker (x=4 is wall).
+    const walker = makeChar(3, floor_y, "marrow", "Kaida");
+    const blocker = makeChar(2, floor_y, "soren", "Caspian");
+    const wall3 = makeChar(1, floor_y, "ghost", "Ghost");
+    s.characters = [walker, blocker, wall3];
+
+    walkTo(s.scene, walker, 1, 0);
+    tickCharacters(s, 0, 1 / 60);
+    tickCharacters(s, 1800, 1 / 60);
+
+    expect(walker.path).toBeNull();
+    expect(s.log.some((l) => l.text.includes("no room to nudge"))).toBe(true);
   });
 });
