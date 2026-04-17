@@ -427,7 +427,7 @@ export function RPG() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       drawTimeOfDay(ctx, simHour(now, s.simStartedAt), cssW, cssH);
       drawVignette(ctx, cssW, cssH);
-      drawDialog(ctx, s.pending, now, cssW, cssH);
+      drawDialog(ctx, s.pending, now, cssW, cssH, s.characters);
 
       raf = requestAnimationFrame(draw);
     };
@@ -2816,6 +2816,7 @@ function drawDialog(
   now: number,
   W: number,
   H: number,
+  characters: Character[],
 ) {
   if (!pending) return;
   const shown = pending.full.slice(0, Math.floor(pending.shown));
@@ -2845,14 +2846,17 @@ function drawDialog(
   ctx.fillRect(boxX + 4, boxY + boxH - 6, 6, 2);
   ctx.fillRect(boxX + boxW - 10, boxY + boxH - 6, 6, 2);
 
-  // Speaker tag (if it's a speech line attributed to a character)
+  // Speaker tag (if it's a speech line attributed to a character).
+  // Slot keys "marrow"/"soren" are internal — resolve them to the actual
+  // profile name from cast position 0 / 1 so dialog shows the invented name.
   let speakerLabel = "";
   let speakerColor = "#e8c86a";
-  if (pending.kind === "speech_marrow") {
-    speakerLabel = "MARROW";
-  } else if (pending.kind === "speech_soren") {
-    speakerLabel = "SOREN";
-    speakerColor = "#8ab0c8";
+  if (pending.kind === "speech_marrow" || pending.kind === "speech_soren") {
+    const cast = characters.filter((c) => !c.transient);
+    const slotIdx = pending.kind === "speech_marrow" ? 0 : 1;
+    const speaker = cast[slotIdx];
+    if (speaker) speakerLabel = speaker.name.toUpperCase();
+    if (pending.kind === "speech_soren") speakerColor = "#8ab0c8";
   }
   let textTopPad = 10;
   if (speakerLabel) {
@@ -2864,10 +2868,10 @@ function drawDialog(
   }
 
   // Strip the "Name: " prefix if it's a speech line — we show the
-  // speaker as the tag instead.
+  // speaker as the tag instead. Names may be 1–2 words.
   let displayText = shown;
   if (speakerLabel) {
-    displayText = displayText.replace(/^[A-Za-z]+:\s*/, "");
+    displayText = displayText.replace(/^[A-Za-z]+(?:\s+[A-Za-z]+)?:\s*/, "");
     displayText = displayText.replace(/^["']|["']$/g, "");
   }
 
