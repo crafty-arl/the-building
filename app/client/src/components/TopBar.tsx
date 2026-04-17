@@ -1,5 +1,6 @@
 import { useAugur } from "../state";
 import { ExportButton } from "./ExportButton";
+import { PushButton } from "./PushButton";
 import type { ConnectionStatus } from "../lib/ws";
 
 interface Props {
@@ -54,6 +55,7 @@ export function TopBar({ status }: Props) {
         </span>
         <span className="topbar-divider" aria-hidden />
         <ExportButton />
+        <PushButton />
         <button className="icon-btn" type="button" aria-label="Settings" title="Settings">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
             <circle cx="12" cy="12" r="3" />
