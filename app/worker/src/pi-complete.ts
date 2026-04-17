@@ -69,12 +69,19 @@ export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
     ...(opts.toolChoice ? { toolChoice: opts.toolChoice } : {}),
   } satisfies Record<string, unknown>;
 
+  console.log(
+    `[pi-ai] DO→pi-ai complete model=${model.id} api=${model.api} provider=${model.provider} stream=${!!opts.onToken} tools=${opts.tools?.length ?? 0} toolChoice=${opts.toolChoice ?? "auto"} sessionId=${opts.sessionId} msgs=${piMessages.length} sysLen=${systemPrompt.length}`,
+  );
+
   if (opts.onToken) {
     // Streaming path — aggregate text deltas and fire onToken per chunk.
     return streamToResult(opts, model, context, callOpts, toolNameByCallId);
   }
 
   const assistant = await piComplete(model, context, callOpts);
+  console.log(
+    `[pi-ai] DO←pi-ai complete(non-stream) stopReason=${assistant.stopReason} in=${assistant.usage.input} out=${assistant.usage.output} toolCalls=${assistant.content.filter((c) => c.type === "toolCall").length}`,
+  );
   return assistantToResult(opts, assistant);
 }
 
@@ -98,20 +105,31 @@ async function streamToResult(
 ): Promise<CompleteResult> {
   const iterable = piStream(model, context, callOpts as Parameters<typeof piStream>[2]);
   let finalMessage: PiAssistantMessage | undefined;
+  let deltaCount = 0;
+  let firstDeltaSeen = false;
   for await (const ev of iterable as AsyncIterable<AssistantMessageEvent>) {
     if (ev.type === "text_delta") {
       const delta = (ev as { delta?: string }).delta ?? "";
+      if (!firstDeltaSeen && delta) {
+        firstDeltaSeen = true;
+        console.log(`[pi-ai] DO←pi-ai first text_delta (streaming confirmed)`);
+      }
+      if (delta) deltaCount++;
       if (delta && opts.onToken) opts.onToken(delta);
     } else if (ev.type === "done") {
       finalMessage = (ev as { message: PiAssistantMessage }).message;
     } else if (ev.type === "error") {
       const err = (ev as { error: PiAssistantMessage }).error;
       finalMessage = err;
+      console.log(`[pi-ai] DO←pi-ai error ${err.errorMessage ?? "(no message)"}`);
     }
   }
   if (!finalMessage) {
     throw new Error("pi-ai stream ended without a done/error event");
   }
+  console.log(
+    `[pi-ai] DO←pi-ai stream done deltas=${deltaCount} stopReason=${finalMessage.stopReason} in=${finalMessage.usage.input} out=${finalMessage.usage.output} toolCalls=${finalMessage.content.filter((c) => c.type === "toolCall").length}`,
+  );
   return assistantToResult(opts, finalMessage, toolNameByCallId);
 }
 
