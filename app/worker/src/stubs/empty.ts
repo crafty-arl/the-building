@@ -10,7 +10,14 @@
  * import graph unless aliased away.
  */
 
-const proxy: unknown = new Proxy(() => proxy, {
+// Proxy target MUST be a regular function (not an arrow) so it exposes the
+// [[Construct]] internal slot — pi-ai's openai-completions driver does
+// `new OpenAI(...)` with the default import, which requires the target to
+// be constructible or the `construct` trap to be reachable.
+function target(): unknown {
+  return proxy;
+}
+const proxy: unknown = new Proxy(target, {
   get: () => proxy,
   apply: () => proxy,
   construct: () => proxy as object,
