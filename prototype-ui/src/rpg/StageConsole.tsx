@@ -139,6 +139,13 @@ export function StageConsole(props: Props) {
   const consoleRef = useRef<HTMLDivElement | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [dragOffset, setDragOffset] = useState<number | null>(null);
+
+  // Pop the dock back up whenever a new game launches: if the player
+  // collapsed it in the menu or on a prior floor, a fresh run should
+  // start with the console visible.
+  useEffect(() => {
+    if (inPlay) setCollapsed(false);
+  }, [inPlay]);
   const dragStartRef = useRef<
     { y: number; baseline: number; height: number; moved: boolean } | null
   >(null);
@@ -174,14 +181,26 @@ export function StageConsole(props: Props) {
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {}
-    const delta = e.clientY - start.y;
-    const threshold = 80;
-    if (!start.moved) {
-      setCollapsed((c) => !c);
-    } else if (collapsed) {
-      if (delta < -threshold) setCollapsed(false);
-    } else if (delta > threshold) {
+    // Asymmetric commit:
+    //  • Collapsed → open: any release opens. The dock is tall and dragging
+    //    it all the way up is physically tedious, so we don't gate on drag
+    //    distance. Tap or nudge — either one brings it back.
+    //  • Open → collapse: require real intent (past halfway or a clear
+    //    downward flick) so accidental touches don't close the dock.
+    if (collapsed) {
+      setCollapsed(false);
+    } else if (!start.moved) {
       setCollapsed(true);
+    } else {
+      const maxOffset = Math.max(1, start.height - GRABBER_PEEK);
+      const delta = e.clientY - start.y;
+      const finalOffset = Math.min(
+        maxOffset,
+        Math.max(0, start.baseline + delta),
+      );
+      const FLICK = 36;
+      const close = finalOffset > maxOffset / 2 || delta > FLICK;
+      setCollapsed(close);
     }
     dragStartRef.current = null;
     setDragOffset(null);
