@@ -8,20 +8,9 @@ import { StateStrip } from "./components/StateStrip";
 import { DMBar } from "./components/DMBar";
 import { ClawHandDrawer } from "./components/ClawHandDrawer";
 import { KickedScreen } from "./components/KickedScreen";
+import { RunEndOverlay } from "./components/RunEndOverlay";
+import { SoftWarningBanner } from "./components/SoftWarningBanner";
 
-/**
- * Fiction Reactor — the DM is watching. Grid:
- *   56px  top bar
- *   1px   rule
- *   1fr   body (claw rail + main prose)
- *   1px   rule
- *   56px  state strip
- *   1px   rule
- *   64px  dm bar
- *
- * Claw's hand drawer opens on top of everything. TODOs tracked inline in
- * the components — objective/pack name/day counter are hardcoded proxies.
- */
 export function App() {
   const apply = useAugur((s) => s.applyServer);
   const kicked = useAugur((s) => s.kicked);
@@ -54,9 +43,11 @@ export function App() {
       <div className="rule-row" aria-hidden />
       <DMBar />
       {errorMessage && <div className="error-banner">{errorMessage}</div>}
+      <SoftWarningBanner />
       <ClawHandDrawer
         onPlay={(cardId) => ws.send({ type: "play", cardId })}
       />
+      <RunEndOverlay />
       {kicked && <KickedScreen />}
     </div>
   );

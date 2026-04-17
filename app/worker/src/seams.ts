@@ -15,6 +15,7 @@
  * directly against cf-ai.ts's extended complete() (tool-call streaming).
  */
 
+import type { DailyPlan, RunClock } from "../../shared/protocol.ts";
 import { type Card, findCard } from "./cards.ts";
 import { STRANGER, type Scene, sceneSystemPrompt } from "./scene.ts";
 import { type Entry, SessionTree } from "./tree.ts";
@@ -57,6 +58,10 @@ export interface SeamCtx {
   onEffect?: (effect: ToolEffect) => void;
   /** Optional abort. */
   signal?: AbortSignal;
+  /** Today's plan — injects residents + schedule into the system prompt. */
+  dailyPlan?: DailyPlan;
+  /** Current in-game clock for schedule-aware narration. */
+  clock?: RunClock;
 }
 
 interface NarrateOpts {
@@ -96,7 +101,7 @@ async function narrate(ctx: SeamCtx, opts: NarrateOpts): Promise<Entry> {
     userMessages.push({ role: "user", content, timestamp: Date.now() } as UserMessage);
   }
 
-  const sys = sceneSystemPrompt(ctx.scene);
+  const sys = sceneSystemPrompt(ctx.scene, ctx.dailyPlan, ctx.clock);
   const factsBlock = ctx.tree.renderFacts();
   const systemParts: string[] = [];
   if (!opts.minimalSystem) systemParts.push(sys);

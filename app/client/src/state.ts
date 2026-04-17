@@ -1,11 +1,18 @@
 import { create } from "zustand";
 import type {
   CardWire,
+  DailyPlan,
+  RunClock,
   SceneWire,
   ServerMessage,
   TreeEntryWire,
   TreeSnapshot,
 } from "../../shared/protocol";
+
+export interface RunEnd {
+  reason: "time" | "footsteps" | "schedule";
+  epitaph: string;
+}
 
 interface StreamingTurn {
   turnId: string;
@@ -21,6 +28,10 @@ interface AugurState {
   kicked: boolean;
   connected: boolean;
   errorMessage: string | null;
+  dailyPlan: DailyPlan | null;
+  clock: RunClock | null;
+  softWarningMs: number | null;
+  runEnd: RunEnd | null;
 
   // UI-only state — the Fiction Reactor shell.
   clawThoughtOpen: boolean;
@@ -31,6 +42,7 @@ interface AugurState {
   setKicked(k: boolean): void;
   setClawThoughtOpen(open: boolean): void;
   setHandDrawerOpen(open: boolean): void;
+  dismissSoftWarning(): void;
   reset(): void;
 }
 
@@ -45,6 +57,10 @@ export const useAugur = create<AugurState>((set) => ({
   kicked: false,
   connected: false,
   errorMessage: null,
+  dailyPlan: null,
+  clock: null,
+  softWarningMs: null,
+  runEnd: null,
   clawThoughtOpen: false,
   handDrawerOpen: false,
 
@@ -56,9 +72,19 @@ export const useAugur = create<AugurState>((set) => ({
           tree: msg.tree,
           hand: msg.hand,
           footsteps: msg.footsteps,
+          dailyPlan: msg.dailyPlan,
+          clock: msg.clock,
+          softWarningMs: null,
+          runEnd: null,
           streamingTurn: null,
           errorMessage: null,
         });
+        break;
+      case "soft-warning":
+        set({ softWarningMs: msg.remainingMs });
+        break;
+      case "run-ended":
+        set({ runEnd: { reason: msg.reason, epitaph: msg.epitaph } });
         break;
       case "token":
         set((s) => {
@@ -107,6 +133,9 @@ export const useAugur = create<AugurState>((set) => ({
   setHandDrawerOpen(handDrawerOpen) {
     set({ handDrawerOpen });
   },
+  dismissSoftWarning() {
+    set({ softWarningMs: null });
+  },
   reset() {
     set({
       scene: null,
@@ -117,6 +146,10 @@ export const useAugur = create<AugurState>((set) => ({
       kicked: false,
       connected: false,
       errorMessage: null,
+      dailyPlan: null,
+      clock: null,
+      softWarningMs: null,
+      runEnd: null,
       clawThoughtOpen: false,
       handDrawerOpen: false,
     });
