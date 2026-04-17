@@ -1763,8 +1763,20 @@ export function onStorageError(fn: (e: StorageError) => void): () => void {
   return () => storageErrorListeners.delete(fn);
 }
 
+// Dedupe identical console warnings — when IDB enters a failed state every
+// ~3s saveRoom would otherwise spam the console with the same line forever.
+// Listeners still get notified on every error so UI surfacing stays accurate.
+const REPORT_DEDUPE_MS = 30_000;
+const lastReportAt = new Map<string, number>();
+
 function reportStorageError(e: StorageError): void {
-  console.warn("[augur] storage error", e);
+  const fingerprint = `${e.kind}:${e.key}:${(e.error as { name?: string })?.name ?? typeof e.error}`;
+  const now = Date.now();
+  const last = lastReportAt.get(fingerprint) ?? 0;
+  if (now - last > REPORT_DEDUPE_MS) {
+    console.warn("[augur] storage error", e);
+    lastReportAt.set(fingerprint, now);
+  }
   for (const fn of storageErrorListeners) {
     try { fn(e); } catch { /* swallow */ }
   }
@@ -1794,8 +1806,44 @@ const IDB_VERSION = 2;
 let libraryCache: Record<string, SavedRoom> | null = null;
 let hydratePromise: Promise<void> | null = null;
 
+// Cache the open IDB handle. Re-opening on every write turned a single bad
+// connection into a permanent loop where each save reopened, failed, and
+// repoisoned the next attempt. With a cached handle we open once, reuse, and
+// only reopen when the browser actually closes the connection or a write
+// fails (which forces a full reset via disposeIdb).
+let dbPromise: Promise<IDBDatabase> | null = null;
+let idbDisabled = false;
+let idbConsecutiveFailures = 0;
+const IDB_FAILURE_LIMIT = 3;
+
+function disposeIdb(): void {
+  const p = dbPromise;
+  if (!p) return;
+  dbPromise = null;
+  p.then((db) => { try { db.close(); } catch { /* ignore */ } })
+    .catch(() => { /* ignore */ });
+}
+
+function noteIdbSuccess(): void {
+  idbConsecutiveFailures = 0;
+}
+
+function noteIdbFailure(): void {
+  idbConsecutiveFailures++;
+  // The handle is likely poisoned — drop it so the next call opens fresh.
+  disposeIdb();
+  if (idbConsecutiveFailures >= IDB_FAILURE_LIMIT && !idbDisabled) {
+    idbDisabled = true;
+    console.warn(
+      `[augur] disabling IndexedDB after ${idbConsecutiveFailures} consecutive failures; falling back to localStorage`,
+    );
+  }
+}
+
 function openIdb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (idbDisabled) return Promise.reject(new Error("IndexedDB disabled"));
+  if (dbPromise) return dbPromise;
+  const promise = new Promise<IDBDatabase>((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
       reject(new Error("IndexedDB unavailable"));
       return;
@@ -1810,9 +1858,23 @@ function openIdb(): Promise<IDBDatabase> {
         db.createObjectStore(IDB_STORE_BUILDINGS, { keyPath: "id" });
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      // If the browser closes the connection (tab eviction, version change in
+      // another tab, IO error), drop the cached promise so the next open is
+      // a fresh attempt rather than a replay of a dead handle.
+      db.onclose = () => { if (dbPromise === promise) dbPromise = null; };
+      db.onversionchange = () => {
+        try { db.close(); } catch { /* ignore */ }
+        if (dbPromise === promise) dbPromise = null;
+      };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error ?? new Error("idb open failed"));
   });
+  promise.catch(() => { if (dbPromise === promise) dbPromise = null; });
+  dbPromise = promise;
+  return promise;
 }
 
 async function idbGetAll(): Promise<SavedRoom[]> {
@@ -1821,9 +1883,10 @@ async function idbGetAll(): Promise<SavedRoom[]> {
     try {
       const tx = db.transaction(IDB_STORE, "readonly");
       const req = tx.objectStore(IDB_STORE).getAll();
-      req.onsuccess = () => resolve((req.result as SavedRoom[]) ?? []);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => { noteIdbSuccess(); resolve((req.result as SavedRoom[]) ?? []); };
+      req.onerror = () => { noteIdbFailure(); reject(req.error); };
     } catch (e) {
+      noteIdbFailure();
       reject(e);
     }
   });
@@ -1835,9 +1898,10 @@ async function idbPut(room: SavedRoom): Promise<void> {
     try {
       const tx = db.transaction(IDB_STORE, "readwrite");
       tx.objectStore(IDB_STORE).put(room);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      tx.oncomplete = () => { noteIdbSuccess(); resolve(); };
+      tx.onerror = () => { noteIdbFailure(); reject(tx.error); };
     } catch (e) {
+      noteIdbFailure();
       reject(e);
     }
   });
@@ -1849,9 +1913,10 @@ async function idbDelete(id: string): Promise<void> {
     try {
       const tx = db.transaction(IDB_STORE, "readwrite");
       tx.objectStore(IDB_STORE).delete(id);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      tx.oncomplete = () => { noteIdbSuccess(); resolve(); };
+      tx.onerror = () => { noteIdbFailure(); reject(tx.error); };
     } catch (e) {
+      noteIdbFailure();
       reject(e);
     }
   });
@@ -2050,8 +2115,8 @@ async function idbGetBuilding(id: string): Promise<BuildingState | null> {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(IDB_STORE_BUILDINGS, "readonly");
       const req = tx.objectStore(IDB_STORE_BUILDINGS).get(id);
-      req.onsuccess = () => resolve((req.result as BuildingState) ?? null);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => { noteIdbSuccess(); resolve((req.result as BuildingState) ?? null); };
+      req.onerror = () => { noteIdbFailure(); reject(req.error); };
     });
   } catch {
     return null;
@@ -2064,8 +2129,8 @@ async function idbPutBuilding(b: BuildingState): Promise<void> {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(IDB_STORE_BUILDINGS, "readwrite");
       tx.objectStore(IDB_STORE_BUILDINGS).put(b);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      tx.oncomplete = () => { noteIdbSuccess(); resolve(); };
+      tx.onerror = () => { noteIdbFailure(); reject(tx.error); };
     });
   } catch {
     /* non-fatal */
@@ -2078,8 +2143,8 @@ async function idbGetAllBuildings(): Promise<BuildingState[]> {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(IDB_STORE_BUILDINGS, "readonly");
       const req = tx.objectStore(IDB_STORE_BUILDINGS).getAll();
-      req.onsuccess = () => resolve((req.result as BuildingState[]) ?? []);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => { noteIdbSuccess(); resolve((req.result as BuildingState[]) ?? []); };
+      req.onerror = () => { noteIdbFailure(); reject(req.error); };
     });
   } catch {
     return [];

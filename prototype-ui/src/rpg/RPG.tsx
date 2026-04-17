@@ -371,9 +371,14 @@ export function RPG() {
       const follow =
         s.characters.find((c) => c.id === lastActiveRef.current) ?? active ?? null;
 
-      // Reserve a strip at the bottom for the dialog overlay so characters
-      // never sit behind it. The scene is fit to the remaining height.
-      const DIALOG_RESERVED = s.pending ? 108 : 8;
+      // Reserve a strip at the bottom only when a subtitle fallback is
+      // active (narration / ambient / action / speaker-off-screen). Speech
+      // lines ride above the speaker as bubbles and don't reserve any
+      // scene area.
+      const pendingKind = s.pending?.kind;
+      const subtitleActive =
+        !!s.pending && pendingKind !== "speech_marrow" && pendingKind !== "speech_soren";
+      const DIALOG_RESERVED = subtitleActive ? 32 : 8;
       const drawH = Math.max(160, cssH - DIALOG_RESERVED);
 
       // Fit a ceiling+floor+foundation band to the scene draw area. This
@@ -428,7 +433,17 @@ export function RPG() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       drawTimeOfDay(ctx, simHour(now, s.simStartedAt), cssW, cssH);
       drawVignette(ctx, cssW, cssH);
-      drawDialog(ctx, s.pending, now, cssW, cssH);
+      drawDialog(
+        ctx,
+        s.pending,
+        now,
+        cssW,
+        cssH,
+        s.characters,
+        camRef.current.worldX,
+        camWorldY,
+        zoom,
+      );
 
       raf = requestAnimationFrame(draw);
     };
@@ -2667,90 +2682,229 @@ function wrapText(
   return lines;
 }
 
-function drawDialog(
+type PendingLine = {
+  full: string;
+  shown: number;
+  kind: "narration" | "ambient" | "speech_marrow" | "speech_soren" | "action";
+};
+
+function stripSpeechPrefix(s: string): string {
+  // Names may be 1–2 words (e.g. "Mrs. Kanto").
+  return s.replace(/^[A-Za-z.]+(?:\s+[A-Za-z.]+)?:\s*/, "").replace(/^["']|["']$/g, "");
+}
+
+// Pixel-art speech bubble tethered to a speaker on screen. Drawn in screen
+// coordinates so typography is unscaled even though `anchorX/anchorY` come
+// from world→screen projection.
+function drawSpeechBubble(
   ctx: CanvasRenderingContext2D,
-  pending: { full: string; shown: number; kind: "narration" | "ambient" | "speech_marrow" | "speech_soren" | "action" } | null,
+  anchorX: number,
+  anchorY: number,
+  text: string,
+  frameColor: string,
+  stillTyping: boolean,
   now: number,
   W: number,
   H: number,
 ) {
-  if (!pending) return;
-  const shown = pending.full.slice(0, Math.floor(pending.shown));
-  const boxX = 6;
-  const boxH = 92;
-  const boxY = H - boxH - 6;
-  const boxW = W - 12;
-
-  // Scene is clipped above the dialog now, so the box no longer overlaps
-  // characters. A deeper background keeps the typography readable.
-  ctx.fillStyle = "rgba(11, 10, 22, 0.88)";
-  ctx.fillRect(boxX, boxY, boxW, boxH);
-  // Gold frame drawn as stroked rects (scene still visible inside)
-  ctx.fillStyle = "#e8c86a";
-  ctx.fillRect(boxX, boxY, boxW, 2);           // top
-  ctx.fillRect(boxX, boxY + boxH - 2, boxW, 2); // bottom
-  ctx.fillRect(boxX, boxY, 2, boxH);           // left
-  ctx.fillRect(boxX + boxW - 2, boxY, 2, boxH); // right
-  // Subtle inner black rule
-  ctx.strokeStyle = "rgba(26, 20, 9, 0.6)";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(boxX + 3.5, boxY + 3.5, boxW - 7, boxH - 7);
-  // Corner studs
-  ctx.fillStyle = "#e8c86a";
-  ctx.fillRect(boxX + 4, boxY + 4, 6, 2);
-  ctx.fillRect(boxX + boxW - 10, boxY + 4, 6, 2);
-  ctx.fillRect(boxX + 4, boxY + boxH - 6, 6, 2);
-  ctx.fillRect(boxX + boxW - 10, boxY + boxH - 6, 6, 2);
-
-  // Speaker tag (if it's a speech line attributed to a character)
-  let speakerLabel = "";
-  let speakerColor = "#e8c86a";
-  if (pending.kind === "speech_marrow") {
-    speakerLabel = "MARROW";
-  } else if (pending.kind === "speech_soren") {
-    speakerLabel = "SOREN";
-    speakerColor = "#8ab0c8";
-  }
-  let textTopPad = 10;
-  if (speakerLabel) {
-    ctx.fillStyle = speakerColor;
-    ctx.font = "bold 9px ui-monospace, SF Mono, monospace";
-    ctx.textBaseline = "top";
-    ctx.fillText(speakerLabel, boxX + 10, boxY + 8);
-    textTopPad = 22;
-  }
-
-  // Strip the "Name: " prefix if it's a speech line — we show the
-  // speaker as the tag instead.
-  let displayText = shown;
-  if (speakerLabel) {
-    displayText = displayText.replace(/^[A-Za-z]+:\s*/, "");
-    displayText = displayText.replace(/^["']|["']$/g, "");
-  }
-
-  // Body text
-  ctx.fillStyle = "#f0e8d2";
-  ctx.font = "13px ui-monospace, SF Mono, monospace";
+  if (!text) return;
+  const padX = 8;
+  const padY = 6;
+  const lineH = 15;
+  const maxBubbleW = Math.min(260, W - 24);
+  ctx.font = "12px ui-monospace, SF Mono, monospace";
   ctx.textBaseline = "top";
-  const lineH = 17;
-  const maxLines = Math.floor((boxH - textTopPad - 8) / lineH);
-  const lines = wrapText(ctx, displayText, boxW - 20);
-  const visibleLines = lines.slice(Math.max(0, lines.length - maxLines));
-  for (let i = 0; i < visibleLines.length; i++) {
-    ctx.fillText(visibleLines[i], boxX + 10, boxY + textTopPad + i * lineH);
+  const lines = wrapText(ctx, text, maxBubbleW - padX * 2);
+  const maxShownLines = 4;
+  const visibleLines = lines.slice(Math.max(0, lines.length - maxShownLines));
+  let contentW = 0;
+  for (const l of visibleLines) contentW = Math.max(contentW, ctx.measureText(l).width);
+  const bubbleW = Math.max(48, Math.ceil(contentW) + padX * 2);
+  const bubbleH = padY * 2 + visibleLines.length * lineH;
+
+  // Prefer above speaker; flip below if it would clip the top.
+  const tailH = 7;
+  const gap = 4;
+  let flipped = false;
+  let bubbleY = anchorY - gap - tailH - bubbleH;
+  if (bubbleY < 4) {
+    flipped = true;
+    bubbleY = anchorY + gap + tailH;
+    if (bubbleY + bubbleH > H - 4) bubbleY = H - 4 - bubbleH;
   }
 
-  // Blinking pixel caret if still typing
-  if (Math.floor(pending.shown) < pending.full.length) {
+  // Horizontally clamp the bubble while keeping the tail pointed at the
+  // speaker.
+  let bubbleX = Math.round(anchorX - bubbleW / 2);
+  if (bubbleX < 6) bubbleX = 6;
+  if (bubbleX + bubbleW > W - 6) bubbleX = W - 6 - bubbleW;
+
+  // Body + frame.
+  ctx.fillStyle = "rgba(11, 10, 22, 0.92)";
+  ctx.fillRect(bubbleX, bubbleY, bubbleW, bubbleH);
+  ctx.fillStyle = frameColor;
+  ctx.fillRect(bubbleX, bubbleY, bubbleW, 2);
+  ctx.fillRect(bubbleX, bubbleY + bubbleH - 2, bubbleW, 2);
+  ctx.fillRect(bubbleX, bubbleY, 2, bubbleH);
+  ctx.fillRect(bubbleX + bubbleW - 2, bubbleY, 2, bubbleH);
+  // Pixel corner studs.
+  ctx.fillRect(bubbleX + 2, bubbleY + 2, 2, 2);
+  ctx.fillRect(bubbleX + bubbleW - 4, bubbleY + 2, 2, 2);
+  ctx.fillRect(bubbleX + 2, bubbleY + bubbleH - 4, 2, 2);
+  ctx.fillRect(bubbleX + bubbleW - 4, bubbleY + bubbleH - 4, 2, 2);
+
+  // Tail: stepped pixel triangle from bubble edge toward anchor.
+  const tailBaseY = flipped ? bubbleY : bubbleY + bubbleH - 1;
+  const tailDir = flipped ? -1 : 1;
+  const tailClampedX = Math.max(bubbleX + 8, Math.min(bubbleX + bubbleW - 8, anchorX));
+  for (let i = 0; i < tailH; i++) {
+    const w = tailH - i;
+    ctx.fillStyle = frameColor;
+    ctx.fillRect(
+      Math.round(tailClampedX - w),
+      tailBaseY + (i + 1) * tailDir,
+      w * 2,
+      1,
+    );
+    // Inner fill one pixel inside the frame so the tail reads as hollow.
+    if (i > 0 && i < tailH - 1) {
+      ctx.fillStyle = "rgba(11, 10, 22, 0.92)";
+      ctx.fillRect(
+        Math.round(tailClampedX - (w - 1)),
+        tailBaseY + (i + 1) * tailDir,
+        (w - 1) * 2,
+        1,
+      );
+    }
+  }
+
+  // Text.
+  ctx.fillStyle = "#f0e8d2";
+  for (let i = 0; i < visibleLines.length; i++) {
+    ctx.fillText(visibleLines[i], bubbleX + padX, bubbleY + padY + i * lineH);
+  }
+
+  // Streaming caret.
+  if (stillTyping) {
     const blink = Math.floor(now / 450) % 2;
     if (blink) {
       const lastLine = visibleLines[visibleLines.length - 1] ?? "";
-      const tx = boxX + 10 + ctx.measureText(lastLine).width + 4;
-      const ty = boxY + textTopPad + Math.max(0, visibleLines.length - 1) * lineH + 2;
-      ctx.fillStyle = "#e8c86a";
-      ctx.fillRect(tx, ty, 10, 10);
+      const tx = bubbleX + padX + ctx.measureText(lastLine).width + 2;
+      const ty = bubbleY + padY + Math.max(0, visibleLines.length - 1) * lineH + 2;
+      ctx.fillStyle = frameColor;
+      ctx.fillRect(tx, ty, 6, 9);
     }
   }
+}
+
+// Slim subtitle strip at the bottom for narration/ambient/action lines or
+// when the speaker isn't visible. Much shorter than the old dialog box so
+// it doesn't block the scene.
+function drawSubtitle(
+  ctx: CanvasRenderingContext2D,
+  pending: PendingLine,
+  speakerLabel: string,
+  speakerColor: string,
+  now: number,
+  W: number,
+  H: number,
+) {
+  const shown = pending.full.slice(0, Math.floor(pending.shown));
+  const stripH = 32;
+  const stripY = H - stripH;
+  ctx.fillStyle = "rgba(11, 10, 22, 0.82)";
+  ctx.fillRect(0, stripY, W, stripH);
+  ctx.fillStyle = speakerLabel ? speakerColor : "#e8c86a";
+  ctx.fillRect(0, stripY, W, 1);
+
+  let x = 10;
+  if (speakerLabel) {
+    ctx.fillStyle = speakerColor;
+    ctx.font = "bold 10px ui-monospace, SF Mono, monospace";
+    ctx.textBaseline = "middle";
+    ctx.fillText(speakerLabel, x, stripY + stripH / 2);
+    x += ctx.measureText(speakerLabel).width + 10;
+  }
+
+  const displayText = speakerLabel ? stripSpeechPrefix(shown) : shown;
+  ctx.fillStyle = "#f0e8d2";
+  ctx.font = "12px ui-monospace, SF Mono, monospace";
+  ctx.textBaseline = "middle";
+  // Truncate to single line that fits; longer lines still stream and
+  // the later-arriving text scrolls into view as it replaces earlier text.
+  const maxW = W - x - 16;
+  let line = displayText;
+  while (line.length > 0 && ctx.measureText(line).width > maxW) {
+    line = line.slice(1);
+  }
+  ctx.fillText(line, x, stripY + stripH / 2);
+
+  if (Math.floor(pending.shown) < pending.full.length) {
+    const blink = Math.floor(now / 450) % 2;
+    if (blink) {
+      const cx = x + ctx.measureText(line).width + 3;
+      ctx.fillStyle = speakerLabel ? speakerColor : "#e8c86a";
+      ctx.fillRect(cx, stripY + stripH / 2 - 5, 7, 10);
+    }
+  }
+  ctx.textBaseline = "top";
+}
+
+// Dispatcher: tether speech lines to the speaker as a bubble; fall back to
+// a slim subtitle strip for narration or when the speaker isn't on screen.
+function drawDialog(
+  ctx: CanvasRenderingContext2D,
+  pending: PendingLine | null,
+  now: number,
+  W: number,
+  H: number,
+  characters: Character[],
+  camWorldX: number,
+  camWorldY: number,
+  zoom: number,
+) {
+  if (!pending) return;
+  const stillTyping = Math.floor(pending.shown) < pending.full.length;
+  const shown = pending.full.slice(0, Math.floor(pending.shown));
+
+  // Slot keys "marrow"/"soren" are internal — resolve them to cast position
+  // 0/1 so the speaker label shows the invented name and the bubble tethers
+  // to whichever character is actually in that slot.
+  let speaker: Character | undefined;
+  let speakerLabel = "";
+  let speakerColor = "#e8c86a";
+  if (pending.kind === "speech_marrow" || pending.kind === "speech_soren") {
+    const cast = characters.filter((c) => !c.transient);
+    const slotIdx = pending.kind === "speech_marrow" ? 0 : 1;
+    speaker = cast[slotIdx];
+    if (speaker) speakerLabel = speaker.name.toUpperCase();
+    if (pending.kind === "speech_soren") speakerColor = "#8ab0c8";
+  }
+
+  if (speaker && !speaker.dead) {
+    const worldAnchorX = (speaker.pos.x + 0.5) * TILE_PX;
+    const worldAnchorY = speaker.pos.y * TILE_PX - 4;
+    const screenX = (worldAnchorX - camWorldX) * zoom;
+    const screenY = (worldAnchorY - camWorldY) * zoom;
+    const onScreen =
+      screenX > -40 && screenX < W + 40 && screenY > -40 && screenY < H + 40;
+    if (onScreen) {
+      drawSpeechBubble(
+        ctx,
+        screenX,
+        screenY,
+        stripSpeechPrefix(shown),
+        speakerColor,
+        stillTyping,
+        now,
+        W,
+        H,
+      );
+      return;
+    }
+  }
+
+  drawSubtitle(ctx, pending, speakerLabel, speakerColor, now, W, H);
 }
 
 function drawTimeOfDay(ctx: CanvasRenderingContext2D, hour: number, W: number, H: number) {

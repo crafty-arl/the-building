@@ -17,12 +17,21 @@ import {
   handleMe,
 } from "./auth.ts";
 import { handlePush, handlePull, handleRelease } from "./sync.ts";
+import {
+  handleVapidPublicKey,
+  handleSubscribe,
+  handleUnsubscribe,
+  handleTest,
+} from "./push.ts";
 
 export { Hearth };
 
 interface Env extends HearthEnv {
   AI: Ai;
   DB: D1Database;
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
+  VAPID_SUBJECT?: string;
 }
 
 const CORS_HEADERS: HeadersInit = {
@@ -2156,6 +2165,20 @@ export default {
 
     if (url.pathname === "/api/rpg/summarize" && request.method === "POST") {
       return handleSummarize(request, env);
+    }
+
+    // ─── Push routes ─────────────────────────────────────────────────
+    if (url.pathname === "/api/push/vapid-public-key" && request.method === "GET") {
+      return handleVapidPublicKey(env);
+    }
+    if (url.pathname === "/api/push/subscribe" && request.method === "POST") {
+      return handleSubscribe(request, env);
+    }
+    if (url.pathname === "/api/push/unsubscribe" && request.method === "POST") {
+      return handleUnsubscribe(request, env);
+    }
+    if (url.pathname === "/api/push/test" && request.method === "POST") {
+      return handleTest(request, env);
     }
 
     if (url.pathname === "/api/session") {

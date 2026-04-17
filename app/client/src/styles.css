@@ -44,6 +44,10 @@ body,
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* PWA / standalone polish: kill tap highlight, rubber-band, and double-tap zoom. */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  touch-action: manipulation;
 }
 
 button {
@@ -191,6 +195,29 @@ button {
 .export-button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.push-button {
+  font-family: "Inter", sans-serif;
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--amber);
+  border: 1px solid var(--amber-stroke);
+  padding: 5px 10px;
+  border-radius: 2px;
+  background: transparent;
+}
+
+.push-button:hover:not(:disabled) {
+  color: var(--prose-cream);
+  border-color: var(--amber);
+}
+
+.push-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* ─── Body (claw rail + main prose) ────────────────────────────────────── */

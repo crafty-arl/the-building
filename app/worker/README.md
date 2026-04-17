@@ -37,6 +37,17 @@ Required env vars (drop into `.dev.vars`):
 ```
 CLOUDFLARE_ACCOUNT_ID=...
 CLOUDFLARE_API_KEY=...
+
+# Web push (generate with: node .context/gen-vapid.mjs from repo root)
+VAPID_PUBLIC_KEY=...
+VAPID_PRIVATE_KEY=...
+VAPID_SUBJECT="mailto:you@example.com"
+```
+
+Apply the D1 schema locally whenever `schema.sql` changes:
+
+```sh
+wrangler d1 execute augur-db --local --file schema.sql
 ```
 
 `wrangler pages dev` serves the functions on http://localhost:8788. Connect

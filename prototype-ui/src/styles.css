@@ -2017,7 +2017,6 @@ html, body, #root {
 /* Give each view enough bottom padding so content doesn't hide under the dock */
 .rp-shell { padding-bottom: calc(env(safe-area-inset-bottom) + 120px); }
 .rp-building { padding-bottom: calc(env(safe-area-inset-bottom) + 100px); }
-.rp-ingr-foot { padding-bottom: calc(env(safe-area-inset-bottom) + 72px); }
 
 /* ─── Drawer sheet (shared) ────────────────────────────────────────── */
 .rp-sheet-backdrop {
@@ -2531,7 +2530,7 @@ html, body, #root {
 .rp-ingr-foot {
   flex-shrink: 0;
   padding: 10px 14px;
-  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  padding-bottom: calc(env(safe-area-inset-bottom) + 72px);
   background: rgba(10,8,6,0.96);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
