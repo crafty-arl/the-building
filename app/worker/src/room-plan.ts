@@ -79,6 +79,7 @@ const CoordSchema = z.tuple([
 
 const RoomPlanSchema = z
   .object({
+    name: z.string().min(1).max(60),
     tilemap: z
       .array(z.string().min(MIN_COLS).max(MAX_COLS))
       .min(MIN_ROWS)
@@ -174,6 +175,8 @@ export type RoomPlanValidated = z.infer<typeof RoomPlanSchema>;
 
 /** Carried across the worker as the canonical scene + plan bundle. */
 export interface RoomPlan extends DailyPlan {
+  /** Short display name for the room ("The Sealed Attic"). Drives scene.location. */
+  name: string;
   tilemap: string[];
   floorY: number;
   /** name → [x, y] in tile coords. */
@@ -188,7 +191,11 @@ export interface RoomPlan extends DailyPlan {
 
 const ROOM_PLAN_SYSTEM = `You author a single small fictional room. The room must honor the premise the user gives you: residents, objectives, props, and the room's physical shape all sit inside that premise.
 
-Output is a tilemap (the room you can see), anchors (named positions inside it), and exactly 2 residents who live the day there.
+Output is a tilemap (the room you can see), anchors (named positions inside it), exactly 2 residents who live the day there, and a short display name for the room.
+
+NAME RULES:
+- 2-5 words. Definite article ok ("The Sealed Attic"). No quotes, no trailing punctuation.
+- The name must come from the premise — it is how the player will see this room labeled in the building. Distinct premises must get distinct names.
 
 VOICE RULE: Plain words a 5th-grader can read. Concrete images. Short sentences. Activities are things you can SEE happen ("sweeps ash from the hearth", not "contemplates existence").
 
@@ -226,6 +233,7 @@ NPCs:
 
 Return STRICT JSON only, no preamble, no markdown:
 {
+  "name": "The Sealed Attic",
   "tilemap": ["####################", "#..................#", ...],
   "floorY": 9,
   "anchors": { "door": [10, 9], "hearth_face": [3, 6], ... },
@@ -260,10 +268,74 @@ export async function generateRoomPlan(
     `Generate the room. Return STRICT JSON only.`,
   ].join("\n");
 
+  // Single LLM call. If validation fails with only tilemap width drift,
+  // repair the rows in-place (pad short rows with '#', truncate long ones)
+  // and re-validate before falling through to procedural.
+  const first = await attemptRoomPlan(env, ROOM_PLAN_SYSTEM, userPrompt);
+  if (first.ok) return assembleRoomPlan(first.data, dateIso, dayOfWeek, "ai");
+
+  if (first.widthDrift) {
+    const repaired = repairWidthDrift(first.raw, first.expectedCols);
+    if (repaired) {
+      const result = RoomPlanSchema.safeParse(repaired);
+      if (result.success) {
+        console.log(
+          JSON.stringify({
+            at: new Date().toISOString(),
+            ev: "ai",
+            stage: "room-plan:repaired-width",
+          }),
+        );
+        return assembleRoomPlan(result.data, dateIso, dayOfWeek, "ai");
+      }
+    }
+  }
+
+  return proceduralRoomPlan(premise, dateIso, dayOfWeek);
+}
+
+/**
+ * Deterministic repair for width-drift failures. Pads short rows with '#' on
+ * the right and truncates long rows to match the target column count. Returns
+ * null if the raw object doesn't carry a usable tilemap.
+ */
+function repairWidthDrift(
+  raw: unknown,
+  expectedCols: number | null,
+): unknown {
+  if (!raw || typeof raw !== "object") return null;
+  const src = raw as { tilemap?: unknown };
+  if (!Array.isArray(src.tilemap)) return null;
+  const rows = src.tilemap.filter((r): r is string => typeof r === "string");
+  if (rows.length === 0) return null;
+  const cols = expectedCols ?? rows[0].length;
+  if (cols < MIN_COLS || cols > MAX_COLS) return null;
+  const tilemap = rows.map((row) => {
+    if (row.length === cols) return row;
+    if (row.length > cols) return row.slice(0, cols);
+    return row + "#".repeat(cols - row.length);
+  });
+  return { ...(src as object), tilemap };
+}
+
+type RoomPlanAttempt =
+  | { ok: true; data: RoomPlanValidated }
+  | {
+      ok: false;
+      widthDrift: boolean;
+      expectedCols: number | null;
+      raw: unknown;
+    };
+
+async function attemptRoomPlan(
+  env: { AI: AiBinding },
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<RoomPlanAttempt> {
   try {
     const ai = (await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: [
-        { role: "system", content: ROOM_PLAN_SYSTEM },
+        { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
       max_tokens: 3500,
@@ -271,21 +343,43 @@ export async function generateRoomPlan(
     } as never)) as unknown;
     const parsed = parseAiResponse(ai);
     const result = RoomPlanSchema.safeParse(parsed);
-    if (result.success) {
-      return assembleRoomPlan(result.data, dateIso, dayOfWeek, "ai");
-    }
+    if (result.success) return { ok: true, data: result.data };
+    const issues = result.error.issues;
     console.warn(
       JSON.stringify({
         at: new Date().toISOString(),
         ev: "ai",
         stage: "room-plan:invalid",
-        issues: result.error.issues.slice(0, 5).map((i) => ({
+        issues: issues.slice(0, 5).map((i) => ({
           path: i.path.join("."),
           message: i.message,
         })),
         sample: JSON.stringify(parsed ?? null).slice(0, 600),
       }),
     );
+    const widthIssue = issues.find(
+      (i) =>
+        i.path[0] === "tilemap" &&
+        typeof i.message === "string" &&
+        i.message.startsWith("row width"),
+    );
+    const onlyWidthIssues = issues.every(
+      (i) =>
+        i.path[0] === "tilemap" &&
+        typeof i.message === "string" &&
+        i.message.startsWith("row width"),
+    );
+    let expectedCols: number | null = null;
+    if (widthIssue) {
+      const m = widthIssue.message.match(/row 0 width (\d+)/);
+      if (m) expectedCols = Number(m[1]);
+    }
+    return {
+      ok: false,
+      widthDrift: onlyWidthIssues && widthIssue !== undefined,
+      expectedCols,
+      raw: parsed,
+    };
   } catch (e) {
     console.warn(
       JSON.stringify({
@@ -295,9 +389,8 @@ export async function generateRoomPlan(
         error: String(e),
       }),
     );
+    return { ok: false, widthDrift: false, expectedCols: null, raw: null };
   }
-
-  return proceduralRoomPlan(premise, dateIso, dayOfWeek);
 }
 
 function assembleRoomPlan(
@@ -323,6 +416,7 @@ function assembleRoomPlan(
     openingHour: OPENING_HOUR,
     closingHour: CLOSING_HOUR,
     seed: v.seed,
+    name: v.name,
     tilemap: v.tilemap,
     floorY: v.floorY,
     anchors: v.anchors,
@@ -357,7 +451,180 @@ function normalizeSchedule(slots: ScheduleSlot[]): ScheduleSlot[] {
 // ─── Procedural fallback ───────────────────────────────────────────────────
 // Direct port of prototype-ui/src/rpg/engine.ts:generateRoomLocally — same
 // seed → same layout, so a given room's fallback shape is stable across
-// sessions. Plus a canned 2-NPC pair so the scene is always populated.
+// sessions. NPC roster and display name are both derived from the premise
+// so different prompts don't all collapse into the same canned Marek+Idris
+// scene when the LLM path is unavailable.
+
+const FALLBACK_ROOM_NAMES = [
+  "The Sealed Attic",
+  "The Salt Cellar",
+  "The Long Gallery",
+  "The Veiled Shrine",
+  "The Workshop Below",
+  "The Root Cellar",
+  "The Threadbare Parlor",
+  "The Boatwright's Shed",
+  "The Old Dovecote",
+  "The Quiet Nave",
+  "The Under-Stairs",
+  "The Cold Pantry",
+  "The Knotwood Study",
+  "The Dust-White Hall",
+  "The Leaning Workshop",
+  "The Rainglass Room",
+];
+
+interface NpcArchetype {
+  name: string;
+  backstory: string;
+  palette: "warm" | "cool" | "moss" | "rust" | "ash" | "bone";
+  objective: string;
+  motive: string;
+  activities: string[];
+  anchor: "hearth_face" | "window_sill" | "bedside" | "center";
+}
+
+const NPC_ARCHETYPES: NpcArchetype[] = [
+  {
+    name: "Marek",
+    backstory: "Has swept this floor since his father did. Something under it has begun to tap back.",
+    palette: "warm",
+    objective: "Keep the room standing one more night without telling anyone why.",
+    motive: "A debt he cannot name out loud without giving it shape.",
+    activities: [
+      "opens the shutters and lets the cold in",
+      "sweeps ash from the hearth",
+      "counts the coins in the till slowly",
+      "stares at the door as if expecting someone",
+    ],
+    anchor: "hearth_face",
+  },
+  {
+    name: "Idris",
+    backstory: "Arrived three nights ago with a lantern that will not light.",
+    palette: "ash",
+    objective: "Wait for a reply that may not come.",
+    motive: "Afraid to leave and afraid to stay.",
+    activities: [
+      "sits by the window writing nothing",
+      "rubs at the lantern's glass as if warming it",
+      "drinks water and waits",
+      "watches the door without moving",
+    ],
+    anchor: "window_sill",
+  },
+  {
+    name: "Saela",
+    backstory: "A cartographer without a map. Measures the room in paces, not meters.",
+    palette: "cool",
+    objective: "Chart the floor before something else names it for her.",
+    motive: "A sister who vanished inside a room that was not drawn.",
+    activities: [
+      "paces from wall to wall counting under her breath",
+      "sketches the corners onto a scrap of linen",
+      "presses her palm to the cold stone and listens",
+      "unrolls her parchment and rolls it up again",
+    ],
+    anchor: "center",
+  },
+  {
+    name: "Tovin",
+    backstory: "A glassblower whose last piece is still cooling in the next room.",
+    palette: "rust",
+    objective: "Keep the fire alive until the piece is tempered.",
+    motive: "The piece was commissioned by someone he should have refused.",
+    activities: [
+      "feeds the hearth a careful handful of kindling",
+      "checks the heat with the flat of his hand",
+      "mutters the glassblower's counting rhyme",
+      "listens at the interior wall for a crack that isn't there",
+    ],
+    anchor: "hearth_face",
+  },
+  {
+    name: "Brenna",
+    backstory: "A midwife off the clock. Keeps a kettle warm out of habit.",
+    palette: "moss",
+    objective: "Stay awake until dawn, whatever the room tries.",
+    motive: "She promised the last child she saw that she would not leave again.",
+    activities: [
+      "sets the kettle on the hearth and forgets it",
+      "stands in the doorway looking at nothing",
+      "folds and refolds a small square of cloth",
+      "hums a cradle song with no words to it",
+    ],
+    anchor: "hearth_face",
+  },
+  {
+    name: "Osha",
+    backstory: "A bookkeeper mid-audit of a ledger no one asked for.",
+    palette: "bone",
+    objective: "Balance a number that refuses to balance.",
+    motive: "An error that will mean a funeral if it reaches the tax-man.",
+    activities: [
+      "spreads her ledger on the table and sighs at it",
+      "sharpens a quill against the chair leg",
+      "crosses out a line and rewrites it the same",
+      "closes the book and opens it again",
+    ],
+    anchor: "bedside",
+  },
+  {
+    name: "Ren",
+    backstory: "A letter-carrier whose last sack is one envelope short.",
+    palette: "cool",
+    objective: "Find the missing letter before the sender notices.",
+    motive: "The sender will notice.",
+    activities: [
+      "empties the sack onto the floor and counts",
+      "feels along the seam of the door for a draft",
+      "looks under the bed with a lit splinter",
+      "writes a draft of a confession and tears it up",
+    ],
+    anchor: "bedside",
+  },
+  {
+    name: "Halmar",
+    backstory: "An old soldier on the long tail of a short war.",
+    palette: "ash",
+    objective: "Guard the door until someone tells him the watch is over.",
+    motive: "Nobody has told him the watch is over in six years.",
+    activities: [
+      "stands at the door with his hand on the frame",
+      "checks the hinges for rust",
+      "listens to the corridor outside",
+      "sits briefly, then stands again",
+    ],
+    anchor: "center",
+  },
+];
+
+function deriveRoomName(premise: string, seed: number): string {
+  const trimmed = premise.trim();
+  const m = trimmed.match(
+    /\b(?:in|inside|within|behind|below|beneath|above|beyond)\s+(the\s+[a-z][a-z\s-]{2,30})/i,
+  );
+  if (m) {
+    const phrase = m[1].trim().replace(/\s+/g, " ");
+    return phrase.replace(/\w\S*/g, (t) => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase()).slice(0, 40);
+  }
+  return FALLBACK_ROOM_NAMES[seed % FALLBACK_ROOM_NAMES.length];
+}
+
+function pickArchetypes(seed: number): [NpcArchetype, NpcArchetype] {
+  const a = NPC_ARCHETYPES[seed % NPC_ARCHETYPES.length];
+  let bIdx = (seed >>> 8) % NPC_ARCHETYPES.length;
+  if (NPC_ARCHETYPES[bIdx].palette === a.palette || NPC_ARCHETYPES[bIdx].name === a.name) {
+    bIdx = (bIdx + 1) % NPC_ARCHETYPES.length;
+    while (
+      NPC_ARCHETYPES[bIdx].palette === a.palette ||
+      NPC_ARCHETYPES[bIdx].name === a.name
+    ) {
+      bIdx = (bIdx + 1) % NPC_ARCHETYPES.length;
+    }
+  }
+  return [a, NPC_ARCHETYPES[bIdx]];
+}
 
 export function proceduralRoomPlan(
   premise: string,
@@ -368,6 +635,7 @@ export function proceduralRoomPlan(
   for (let i = 0; i < premise.length; i++) {
     seed = (seed * 31 + premise.charCodeAt(i)) >>> 0;
   }
+  const seedBase = seed;
   const rand = () => {
     seed = (seed * 1664525 + 1013904223) >>> 0;
     return seed / 0x100000000;
@@ -456,48 +724,28 @@ export function proceduralRoomPlan(
     anchors[`table_${i}`] = [x, floorY];
   });
 
-  // Canned 2-NPC seed — always something to populate the scene with even
-  // when the LLM is offline. Names + descriptions are intentionally generic;
-  // the LLM path is what gives a room its character.
-  const npcs: NpcDay[] = [
-    {
-      name: "Marek",
-      backstory: "Has swept this floor since his father did. Something under it has begun to tap back.",
-      palette: "warm",
-      objective: "Keep the room standing one more night without telling anyone why.",
-      motive: "A debt he cannot name out loud without giving it shape.",
-      schedule: cannedSchedule([
-        "opens the shutters and lets the cold in",
-        "sweeps ash from the hearth",
-        "counts the coins in the till slowly",
-        "stares at the door as if expecting someone",
-      ]),
-      startAnchor: "hearth_face",
-    },
-    {
-      name: "Idris",
-      backstory: "Arrived three nights ago with a lantern that will not light.",
-      palette: "ash",
-      objective: "Wait for a reply that may not come.",
-      motive: "Afraid to leave and afraid to stay.",
-      schedule: cannedSchedule([
-        "sits by the window writing nothing",
-        "rubs at the lantern's glass as if warming it",
-        "drinks water and waits",
-        "watches the door without moving",
-      ]),
-      startAnchor: "window_sill",
-    },
-  ];
+  // 2-NPC roster chosen by premise seed — different premises produce
+  // different casts even when the LLM path is unavailable.
+  const [archA, archB] = pickArchetypes(seedBase);
+  const npcs: NpcDay[] = [archA, archB].map((arch) => ({
+    name: arch.name,
+    backstory: arch.backstory,
+    palette: arch.palette,
+    objective: arch.objective,
+    motive: arch.motive,
+    schedule: cannedSchedule(arch.activities),
+    startAnchor: arch.anchor in anchors ? arch.anchor : "center",
+  }));
 
   return {
     date: dateIso,
     dayOfWeek,
-    playerObjective: "Find out why the lantern keeps swinging when the wind is down.",
+    playerObjective: `Learn what the room is hiding before the day ends.`,
     npcs,
     openingHour: OPENING_HOUR,
     closingHour: CLOSING_HOUR,
-    seed: `${dayOfWeek} — the fire keeps its slow count, the rain does not.`,
+    seed: `${dayOfWeek} — ${premise.slice(0, 80)}`,
+    name: deriveRoomName(premise, seedBase),
     tilemap: grid,
     floorY,
     anchors,

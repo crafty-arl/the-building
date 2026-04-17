@@ -112,7 +112,8 @@ const MAX_CADENCE_SEC = 1800;
 const DEFAULT_CADENCE_SEC = 60;
 // Kimi is a reasoning model — it streams `thinking_delta` before producing
 // any `text_delta`. Budget must cover thinking + the final JSON response.
-const MAX_TOKENS = 2000;
+// 2000 starved the final output (observed 1993 thinking deltas, 0 text).
+const MAX_TOKENS = 4000;
 const RECENT_EVENTS_WINDOW = 12;
 
 interface NpcData extends Record<string, unknown> {
