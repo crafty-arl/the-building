@@ -522,6 +522,49 @@ function repairMap(
   return out;
 }
 
+// Move any floor-bound furniture (b, t, c, =, ~, plus palette glyphs that
+// aren't opted into above-floor placement) back down to floor_y when the
+// LLM drew them floating. Swap into the column's floor cell if it's '.';
+// otherwise drop the stray glyph. Returns the repaired map.
+export function repairFurniturePlacement(
+  rawMap: unknown,
+  floorY: unknown,
+  palette?: Record<string, { walkable?: boolean; aboveFloor?: boolean }>,
+): string[] {
+  if (!Array.isArray(rawMap)) return [];
+  const map = rawMap.map((r) => (typeof r === "string" ? r : ""));
+  if (map.length === 0) return map;
+  if (typeof floorY !== "number" || !Number.isInteger(floorY) || floorY < 1) return map;
+  if (floorY >= map.length) return map;
+  const cols = map[0].length;
+  const isFloorBound = (ch: string): boolean => {
+    if (CORE_CHARS.includes(ch)) return !ABOVE_FLOOR_CORE.has(ch);
+    const p = palette?.[ch];
+    if (!p) return false; // unknown glyph — leave for schema to reject
+    if (p.walkable) return true;
+    return !p.aboveFloor;
+  };
+  const floorRow = Array.from(map[floorY] ?? "");
+  if (floorRow.length !== cols) return map;
+  for (let r = 0; r < floorY; r++) {
+    const row = Array.from(map[r]);
+    if (row.length !== cols) continue;
+    for (let x = 0; x < cols; x++) {
+      const ch = row[x];
+      if (!isFloorBound(ch)) continue;
+      if (floorRow[x] === ".") {
+        floorRow[x] = ch;
+        row[x] = ".";
+      } else {
+        row[x] = ".";
+      }
+    }
+    map[r] = row.join("");
+  }
+  map[floorY] = floorRow.join("");
+  return map;
+}
+
 function validateRoom(r: unknown): { ok: true; value: RoomResponse } | { ok: false; reason: string } {
   if (!r || typeof r !== "object") return { ok: false, reason: "not object" };
   const obj = r as Record<string, unknown>;
@@ -688,6 +731,7 @@ Hard constraints:
 - The row at index floor_y must contain at least 8 walkable tiles ('.' or '|' or a custom walkable glyph).
 - At least one '|' door ON the floor_y row (so characters can walk to it).
 - At least 30 walkable tiles total in the map.
+- FURNITURE MUST SIT ON floor_y. Glyphs 'b' (bed), 't' (table), 'c' (chair), '=' (counter/bar), '~' (hearth) all belong on the floor_y row. Rows ABOVE floor_y may only contain: '#' '.' 'w' 'l' 'R' — plus custom palette glyphs you explicitly declare as {walkable:false, aboveFloor:true} for wall-mounted props (banners, shelves, signs). Never float a bed, table, chair, counter, or hearth above the floor.
 - 4–8 anchors, each in bounds, each pointing at a walkable tile. Always include 'center'.
 - "Stand here" anchors (center, door_in, bed_side, table_side, chair_side, counter_side, bar_side, etc.) MUST sit on floor_y. "Visual" anchors that point at wall-mounted features (hearth, window, lantern, ceiling_beam, chimney, shelf) MAY sit above floor_y.
 - If you use a non-core glyph, it MUST be declared in "palette". Do not declare glyphs you don't use.
@@ -743,8 +787,15 @@ const PaletteEntrySchema = z.object({
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/, "color must be #rrggbb hex"),
   walkable: z.boolean(),
   glow: z.boolean().optional(),
+  // Allow non-walkable wall-mounted props (banners, shelves) to sit above
+  // floor_y. Defaults to false: unless set, palette glyphs are treated as
+  // floor-bound furniture and repair/validation will move them down.
+  aboveFloor: z.boolean().optional(),
 });
 const CORE_CHARS = "#.|~wbtc=Rl";
+// Core glyphs that are valid above the floor row. Everything else in
+// CORE_CHARS is treated as floor-bound furniture (|, ~, b, t, c, =).
+const ABOVE_FLOOR_CORE = new Set(["#", "R", "w", "l", "."]);
 
 export const MapSchema = z
   .object({
@@ -820,6 +871,29 @@ export const MapSchema = z
         code: z.ZodIssueCode.custom,
         message: "door '|' must sit on floor_y row",
       });
+    }
+    // Furniture invariant: rows above floor_y may only contain core
+    // above-floor glyphs (# R w l .) or palette glyphs opted into
+    // above-floor placement via aboveFloor:true (non-walkable only).
+    for (let r = 0; r < val.floor_y; r++) {
+      const row = val.map[r];
+      for (let x = 0; x < row.length; x++) {
+        const ch = row[x];
+        if (ABOVE_FLOOR_CORE.has(ch)) continue;
+        if (CORE_CHARS.includes(ch)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `furniture '${ch}' at [${x},${r}] must sit on floor_y=${val.floor_y}`,
+          });
+          continue;
+        }
+        const p = palette[ch];
+        if (p && !p.walkable && p.aboveFloor) continue;
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `tile '${ch}' at [${x},${r}] not allowed above floor_y (palette must set aboveFloor:true and walkable:false)`,
+        });
+      }
     }
     // Anchors must be in bounds
     for (const [name, [x, y]] of Object.entries(val.anchors)) {
@@ -915,7 +989,9 @@ async function generateMap(env: Env, prompt: string): Promise<{
       return { ok: false, reason: "unparseable", raw: ai };
     }
     const obj = parsed as Record<string, unknown>;
-    obj.map = repairMap(obj.map, obj.palette as Record<string, PaletteEntry> | undefined);
+    const palette = obj.palette as Record<string, PaletteEntry> | undefined;
+    obj.map = repairMap(obj.map, palette);
+    obj.map = repairFurniturePlacement(obj.map, obj.floor_y, palette);
     const check = MapSchema.safeParse(obj);
     if (check.success) return { ok: true, value: check.data };
     logAiEvent("map:schema-failed", obj, {
@@ -939,7 +1015,9 @@ async function generateMap(env: Env, prompt: string): Promise<{
     const parsed = parseAiResponse(ai);
     if (parsed && typeof parsed === "object") {
       const obj = parsed as Record<string, unknown>;
-      obj.map = repairMap(obj.map, obj.palette as Record<string, PaletteEntry> | undefined);
+      const palette = obj.palette as Record<string, PaletteEntry> | undefined;
+      obj.map = repairMap(obj.map, palette);
+      obj.map = repairFurniturePlacement(obj.map, obj.floor_y, palette);
       const check = MapSchema.safeParse(obj);
       if (check.success) return { ok: true, value: buildValue(check.data) };
       logAiEvent("map:repair-failed", obj, {
@@ -1358,7 +1436,9 @@ interface PlayRequest {
     objective?: string;
     motive?: string;
   }[];
-  anchors: string[];
+  // Clients may send anchors as `string[]` (legacy) or `Array<{name,x}>` (preferred).
+  // With x-coordinates the server can verify directional walk intent.
+  anchors: Array<string | { name: string; x: number }>;
   recent: string[];
   flags?: Record<string, string>;
   tension?: number;
@@ -1368,10 +1448,31 @@ interface PlayRequest {
   inheritedMemory?: string;
 }
 
+function normalizeAnchors(
+  raw: PlayRequest["anchors"],
+): Array<{ name: string; x: number | null }> {
+  return (raw ?? []).map((a) =>
+    typeof a === "string"
+      ? { name: a, x: null }
+      : { name: a.name, x: typeof a.x === "number" ? a.x : null },
+  );
+}
+
 const StepSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("narrate"), text: z.string().min(1).max(280) }),
   z.object({ op: z.literal("speak"), charId: z.string(), text: z.string().min(1).max(200) }),
-  z.object({ op: z.literal("walk"), charId: z.string(), toAnchor: z.string() }),
+  z.object({
+    op: z.literal("walk"),
+    charId: z.string(),
+    toAnchor: z.string(),
+    // Optional semantic hints. `intent` declares whether the walk goes
+    // TOWARD something or AWAY from it; `fromAnchor` names the referent
+    // when away_from. Server-side verification flips toAnchor to the
+    // farthest available anchor when the model picks one that's actually
+    // closer to fromAnchor than the character's current position.
+    intent: z.enum(["toward", "away_from", "near"]).optional(),
+    fromAnchor: z.string().optional(),
+  }),
   z.object({
     op: z.literal("emote"),
     charId: z.string(),
@@ -1421,7 +1522,7 @@ Voice rule (IMPORTANT): Write so a 5th-grader understands every word, and an adu
 Tools you can use (each step is one of these):
 - {"op":"narrate","text":"..."}  – a single plain, present-tense line in the narrator's voice.
 - {"op":"speak","charId":"<id>","text":"..."}  – **a character speaks out loud.** Use this often. Dialogue is how relationships surface. Keep lines short and real — people talking in a small room, not declaiming. One line per speak step.
-- {"op":"walk","charId":"<id>","toAnchor":"<anchorName>"}  – move a character to a named anchor.
+- {"op":"walk","charId":"<id>","toAnchor":"<anchorName>","intent":"toward|away_from|near","fromAnchor":"<anchorName>"}  – move a character to a named anchor. Directional verbs REQUIRE the intent field. See the Directional verbs rule below.
 - {"op":"emote","charId":"<id>","kind":"startle|still|warm|sad|puzzle","ms":1400}
 - {"op":"face","charId":"<id>","facing":"up|down|left|right"}
 - {"op":"wait","ms":600}
@@ -1457,21 +1558,120 @@ Hard rules:
 - **Treat this as a STORY, not a series of isolated beats.** Read the "Story so far" block in the user prompt carefully. Reference what has already happened — who did what, what was said, what was left unsaid, what objects are now in the room. Every plan should build on the last. If the tension is rising, let it rise. If a question was asked three beats ago and never answered, maybe answer it now, or dodge it pointedly. Characters remember.
 - **Use each character's backstory, objective, and motive.** These are their private drives for THIS scenario. Both characters should act in ways consistent with their objectives — pushing toward what they want — and their motives surface in the small choices. Conflict between their objectives should SURFACE, not be avoided. Never spell the backstory/objective/motive out loud as exposition; let them drive action and dialogue sideways.
 - **You have the power to introduce conflict.** If the scenario wants a villain, a stranger, a messenger, or an intruder, spawn_character them in. You can have the existing characters attack each other if the story genuinely demands it — a confession gone wrong, an old wound, a betrayal. You can kill a character (die) only when the weight of the scene has earned it. A death changes everything; treat it as such. Do not spawn and kill gratuitously — conflict serves the story, not the other way around.
+- **Spawn triggers (HARD RULE).** If the directive contains any of: *knock, pounds, arrives, shows up, appears, stranger, visitor, messenger, rider, intruder, at the door, from outside, a voice from, someone outside* — you MUST include a spawn_character step UNLESS the named entity is already in the Characters list. Order MUST be: spawn_character FIRST → narrate the arrival → the new character's first speak or emote. Never narrate an arrival for someone who doesn't yet exist in the cast.
+- **Directional verbs (HARD RULE).** Read the verb before picking the walk target.
+    - *toward / to / approaches / joins / goes to / walks to* → set intent:"toward"; toAnchor is the thing named.
+    - *away / backs away / retreats / flees / recoils / steps back* → set intent:"away_from"; put the thing being fled in fromAnchor, and set toAnchor to the anchor FARTHEST from that thing. Never set toAnchor to the same anchor you are fleeing.
+    - When in doubt, include intent and fromAnchor; the server validates geometry and will reject mismatches.
+- **Blocked walks (HARD RULE).** If the recent log contains a line beginning "[blocked]" for a character, that character's walk step MUST be first in this plan (before any other walk) so their path clears before others move.
 - Do not invent characters that don't exist.
 - Return STRICT JSON only: {"plan":[ ... ]} — no preamble, no markdown.`;
 
-async function runPlayModel(env: Env, userPrompt: string): Promise<unknown> {
+async function runPlayModel(
+  env: Env,
+  userPrompt: string,
+  extraSystem?: string,
+): Promise<unknown> {
+  const systemContent = extraSystem
+    ? `${PLAY_SYSTEM}\n\nADDITIONAL CONSTRAINT: ${extraSystem}`
+    : PLAY_SYSTEM;
   return (await env.AI.run(
     "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     {
       messages: [
-        { role: "system", content: PLAY_SYSTEM },
+        { role: "system", content: systemContent },
         { role: "user", content: userPrompt },
       ],
       max_tokens: 800,
       temperature: 0.75,
     } as never,
   )) as unknown;
+}
+
+// Arrival-verb regex. If a directive matches, the plan should include a
+// spawn_character step (unless the named entity already exists in the cast).
+const ARRIVAL_VERB_RE =
+  /\b(knock|knocks|knocking|pound|pounds|pounding|arrives?|shows? up|appears?|stranger|visitor|messenger|rider|intruder|at the door|from outside|a voice from|someone outside)\b/i;
+
+type ParsedStep = z.infer<typeof StepSchema>;
+
+interface AutoCorrectResult {
+  plan: ParsedStep[];
+  retryReason: string | null;
+  notes: string[];
+}
+
+// Post-validation: repair obvious director mistakes and flag cases where
+// a single-retry would plausibly produce a better plan.
+function autoCorrectPlan(
+  directive: string,
+  steps: ParsedStep[],
+  existingCharIds: Set<string>,
+  anchors: Array<{ name: string; x: number | null }>,
+  characters: PlayRequest["characters"],
+): AutoCorrectResult {
+  const notes: string[] = [];
+  const out: ParsedStep[] = [];
+  // Fast lookup: anchor name → x (null if unknown).
+  const anchorX = new Map<string, number | null>();
+  for (const a of anchors) anchorX.set(a.name, a.x);
+
+  // Directional verb repair: if intent=away_from and the model chose a
+  // toAnchor that's actually CLOSER to fromAnchor than an alternative,
+  // flip to the farthest available anchor from fromAnchor.
+  for (const raw of steps) {
+    if (
+      raw.op === "walk" &&
+      raw.intent === "away_from" &&
+      raw.fromAnchor &&
+      anchorX.has(raw.fromAnchor)
+    ) {
+      const fromX = anchorX.get(raw.fromAnchor);
+      const toX = anchorX.get(raw.toAnchor);
+      if (typeof fromX === "number") {
+        // Find the farthest anchor with a known x from fromAnchor.
+        let farthestName = raw.toAnchor;
+        let farthestDist = typeof toX === "number" ? Math.abs(toX - fromX) : -1;
+        for (const a of anchors) {
+          if (a.x === null || a.name === raw.fromAnchor) continue;
+          const d = Math.abs(a.x - fromX);
+          if (d > farthestDist) {
+            farthestDist = d;
+            farthestName = a.name;
+          }
+        }
+        if (farthestName !== raw.toAnchor) {
+          notes.push(
+            `walk(${raw.charId}) away_from ${raw.fromAnchor}: flipped toAnchor ${raw.toAnchor} → ${farthestName}`,
+          );
+          out.push({ ...raw, toAnchor: farthestName });
+          continue;
+        }
+      }
+    }
+    out.push(raw);
+  }
+
+  // Arrival-verb gate: directive mentions an arrival but plan has no spawn
+  // AND no named entity already in the cast. Signal a retry.
+  let retryReason: string | null = null;
+  if (ARRIVAL_VERB_RE.test(directive)) {
+    const hasSpawn = out.some((s) => s.op === "spawn_character");
+    // Cheap heuristic: does the directive mention any existing character
+    // name or id? If so, we assume the director referenced them on purpose.
+    const dirLc = directive.toLowerCase();
+    const mentionsExisting = characters.some((c) => {
+      if (existingCharIds.has(c.id) && dirLc.includes(c.id.toLowerCase())) return true;
+      if (c.name && dirLc.includes(c.name.toLowerCase())) return true;
+      return false;
+    });
+    if (!hasSpawn && !mentionsExisting) {
+      retryReason =
+        "The player's directive mentions an arrival or new presence (knock, stranger, visitor, etc.). Your plan must include a spawn_character step before narrating the arrival.";
+    }
+  }
+
+  return { plan: out, retryReason, notes };
 }
 
 async function handlePlay(request: Request, env: Env): Promise<Response> {
@@ -1485,7 +1685,8 @@ async function handlePlay(request: Request, env: Env): Promise<Response> {
     });
   }
   const charIds = new Set(body.characters?.map((c) => c.id) ?? []);
-  const anchorSet = new Set(body.anchors ?? []);
+  const normAnchors = normalizeAnchors(body.anchors ?? []);
+  const anchorSet = new Set(normAnchors.map((a) => a.name));
   const flagLines = Object.entries(body.flags ?? {});
   const userPrompt = [
     `Scene context: ${body.roomContext || "a quiet room"}`,
@@ -1502,7 +1703,10 @@ async function handlePlay(request: Request, env: Env): Promise<Response> {
           c.motive ? `    motive (why they want it): ${c.motive}` : "",
         ].filter(Boolean).join("\n"),
     ),
-    `Anchors available (use these names exactly): ${body.anchors.join(", ")}`,
+    `Anchors available (use these names exactly): ${normAnchors.map((a) => a.name).join(", ")}`,
+    normAnchors.some((a) => a.x !== null)
+      ? `Anchor positions (floor x-coordinate, for directional reasoning): ${normAnchors.filter((a) => a.x !== null).map((a) => `${a.name}=${a.x}`).join(", ")}`
+      : "",
     flagLines.length > 0
       ? `World state flags:\n${flagLines.map(([k, v]) => `  ${k}=${v}`).join("\n")}`
       : "",
@@ -1529,51 +1733,82 @@ async function handlePlay(request: Request, env: Env): Promise<Response> {
     .filter(Boolean)
     .join("\n");
 
+  // Parse + Zod-filter a raw AI response into valid steps. Pulled out so
+  // the retry path can run it identically to the first attempt.
+  const collectSteps = (aiResponse: unknown): ParsedStep[] => {
+    const parsed = parseAiResponse(aiResponse);
+    if (!parsed || typeof parsed !== "object") return [];
+    let rawPlan: unknown = (parsed as { plan?: unknown }).plan;
+    if (!Array.isArray(rawPlan) && Array.isArray(parsed)) rawPlan = parsed;
+    if (!Array.isArray(rawPlan)) {
+      for (const v of Object.values(parsed as Record<string, unknown>)) {
+        if (Array.isArray(v)) { rawPlan = v; break; }
+      }
+    }
+    const collected: ParsedStep[] = [];
+    if (Array.isArray(rawPlan)) {
+      for (const raw of rawPlan) {
+        const one = StepSchema.safeParse(raw);
+        if (one.success) collected.push(one.data);
+      }
+    }
+    return collected;
+  };
+
   let lastAiResponse: unknown = null;
   try {
     const aiResponse = await runPlayModel(env, userPrompt);
     lastAiResponse = aiResponse;
-    const parsed = parseAiResponse(aiResponse);
-    if (parsed && typeof parsed === "object") {
-      // Accept {plan:[...]}, or a bare array, or an object whose first
-      // array-valued field is the plan.
-      let rawPlan: unknown = (parsed as { plan?: unknown }).plan;
-      if (!Array.isArray(rawPlan) && Array.isArray(parsed)) {
-        rawPlan = parsed;
+    let steps = collectSteps(aiResponse);
+
+    // First autocorrect pass: repair directional walks in-place; flag
+    // if the arrival-verb gate requires a re-run.
+    let correction = autoCorrectPlan(
+      body.directive,
+      steps,
+      charIds,
+      normAnchors,
+      body.characters ?? [],
+    );
+    if (correction.retryReason) {
+      // One free retry: amend the system prompt with the reason and re-run.
+      logAiEvent("play:retry", correction.retryReason, {
+        directive: body.directive,
+      });
+      const retryResponse = await runPlayModel(env, userPrompt, correction.retryReason);
+      lastAiResponse = retryResponse;
+      const retrySteps = collectSteps(retryResponse);
+      // Use the retry plan only if it's non-empty; otherwise fall back to
+      // the first attempt so we don't strand the player on a blank.
+      if (retrySteps.length > 0) {
+        steps = retrySteps;
+        correction = autoCorrectPlan(
+          body.directive,
+          steps,
+          charIds,
+          normAnchors,
+          body.characters ?? [],
+        );
       }
-      if (!Array.isArray(rawPlan)) {
-        for (const v of Object.values(parsed as Record<string, unknown>)) {
-          if (Array.isArray(v)) { rawPlan = v; break; }
-        }
+    }
+
+    // Pass-through with minimal cleaning. The client side resolves
+    // character ids fuzzily (by id, normalized id, or name), so dropping
+    // steps here just because the LLM used a slightly different form
+    // would block otherwise-valid actions. Let everything through — the
+    // client resolves unknown ids and anchors gracefully.
+    const cleaned: ParsedStep[] = [...correction.plan];
+    void charIds;
+    void anchorSet;
+    if (cleaned.length >= 1) {
+      // Ensure the plan closes on a narrative beat so scenes feel complete.
+      const last = cleaned[cleaned.length - 1];
+      if (last && last.op !== "narrate") {
+        cleaned.push({ op: "narrate", text: "The room settles." });
       }
-      const steps: z.infer<typeof StepSchema>[] = [];
-      if (Array.isArray(rawPlan)) {
-        for (const raw of rawPlan) {
-          const one = StepSchema.safeParse(raw);
-          if (one.success) steps.push(one.data);
-        }
-      }
-      // Pass-through with minimal cleaning. The client side resolves
-      // character ids fuzzily (by id, normalized id, or name), so dropping
-      // steps here just because the LLM used a slightly different form
-      // (e.g. "kaida" instead of "kaida_black") blocks otherwise-valid
-      // actions. Only filter walks with unknown anchors; let everything
-      // else through.
-      // Let everything through — the client resolves unknown ids and
-      // anchors gracefully (walk falls back to nearest anchor, etc.).
-      const cleaned: typeof steps = [...steps];
-      void charIds;
-      void anchorSet;
-      if (cleaned.length >= 1) {
-        // Ensure the plan closes on a narrative beat so scenes feel complete.
-        const last = cleaned[cleaned.length - 1];
-        if (last && last.op !== "narrate") {
-          cleaned.push({ op: "narrate", text: "The room settles." });
-        }
-        return new Response(JSON.stringify({ plan: cleaned }), {
-          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        });
-      }
+      return new Response(JSON.stringify({ plan: cleaned }), {
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      });
     }
   } catch (e: unknown) {
     logAiEvent("play:exception", String(e), { directive: body.directive });

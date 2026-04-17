@@ -6,6 +6,7 @@ import {
   type SavedRoom,
   TILE_PX,
   stepCamera,
+  computeSceneBand,
   formatSimTime,
   initialState,
   tickPlans,
@@ -358,9 +359,7 @@ export function RPG() {
       const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
       // World size in CSS pixels (before camera zoom).
       const cols = s.scene.map[0]?.length ?? 0;
-      const rows = s.scene.map.length;
       const worldW = cols * TILE_PX;
-      const worldH = rows * TILE_PX;
 
       // Pick an active follow target. Preference: whoever has pending
       // speech now, else the last-moving character, else the first.
@@ -371,12 +370,18 @@ export function RPG() {
       const follow =
         s.characters.find((c) => c.id === lastActiveRef.current) ?? active ?? null;
 
-      // Fit-to-height zoom: if the room is shorter than the viewport,
-      // stretch world pixels vertically so the scene fills the canvas.
-      // Otherwise use the natural 1× zoom and let the camera scroll.
-      const fitZoom = worldH > 0 ? Math.max(1, cssH / worldH) : 1;
-      camRef.current.zoom = fitZoom;
-      const zoom = camRef.current.zoom;
+      // Reserve a strip at the bottom for the dialog overlay so characters
+      // never sit behind it. The scene is fit to the remaining height.
+      const DIALOG_RESERVED = s.pending ? 108 : 8;
+      const drawH = Math.max(160, cssH - DIALOG_RESERVED);
+
+      // Fit a ceiling+floor+foundation band to the scene draw area. This
+      // crops empty-sky rows above the floor and scales tiles/sprites up
+      // to a readable size (Phaser-style setBounds + setZoom semantics).
+      const band = computeSceneBand(s.scene, drawH);
+      camRef.current.zoom = band.zoom;
+      const zoom = band.zoom;
+      const camWorldY = band.topRow * TILE_PX;
 
       // Target x (world px) is the follow character's center.
       const targetX = follow ? (follow.pos.x + 0.5) * TILE_PX : worldW / 2;
@@ -388,15 +393,35 @@ export function RPG() {
         zoom,
       ).worldX;
 
-      // Reset to identity, clear, then apply camera (dpr × zoom, -camX).
+      // Reset to identity, clear.
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, -camRef.current.worldX * dpr * zoom, 0);
 
-      drawScene(ctx, s.scene, now);
+      // Clip the world draw to the scene area (everything below is dialog
+      // territory). Clip path is defined in device pixels before any
+      // world transform is applied.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, cssW * dpr, drawH * dpr);
+      ctx.clip();
+
+      // Apply camera (dpr × zoom, -camX, -camY).
+      ctx.setTransform(
+        dpr * zoom,
+        0,
+        0,
+        dpr * zoom,
+        -camRef.current.worldX * dpr * zoom,
+        -camWorldY * dpr * zoom,
+      );
+
+      drawScene(ctx, s.scene, now, band);
       drawFlagOverlays(ctx, s.scene, s.flags, now);
       drawRoomItems(ctx, s.scene, s.roomItems, now);
       for (const c of s.characters) drawCharacter(ctx, c, s.scene, now, s.characters);
+
+      // End world-clip region.
+      ctx.restore();
 
       // Screen-space overlays — reset to identity (dpr only).
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -2012,31 +2037,42 @@ function drawRoomItems(
   ctx.save();
   ctx.font = "7px ui-monospace, SF Mono, monospace";
   ctx.textBaseline = "middle";
+  // Group items sharing an anchor so we can stack their labels vertically
+  // instead of scattering them horizontally (which caused overlap with the
+  // character nameplates sitting on the same floor row).
+  const perAnchor = new Map<string, number>();
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     const anchorName = it.anchor && scene.anchors[it.anchor] ? it.anchor : "center";
     const a = scene.anchors[anchorName] ?? { x: 8, y: 5 };
-    // Scatter slightly so multiple items at the same anchor don't stack.
-    const scatter = (i % 3) * 5 - 5;
-    const px = a.x * TILE_PX + TILE_PX / 2 + scatter;
-    // Sit the marker just above the anchor tile's bottom so items perch
-    // on surfaces (floor, table, chair) instead of floating mid-tile.
-    const py = a.y * TILE_PX + TILE_PX - 8;
-    // Warm glow pulse
+    const stackIdx = perAnchor.get(anchorName) ?? 0;
+    perAnchor.set(anchorName, stackIdx + 1);
+    const px = a.x * TILE_PX + TILE_PX / 2;
+    // Glow dot sits on the anchor tile's top edge (where the item rests).
+    const py = a.y * TILE_PX + 4;
+    // Warm glow pulse on the dot.
     const pulse = 0.5 + 0.3 * Math.sin(now / 600 + i * 1.7);
     ctx.globalAlpha = pulse;
     ctx.fillStyle = "#e8c86a";
     ctx.beginPath();
     ctx.arc(px, py, 2.5, 0, Math.PI * 2);
     ctx.fill();
-    // Label
-    ctx.globalAlpha = 0.7;
+    // Label floats ABOVE the anchor, stacked per collision index so
+    // multiple items on the same tile list cleanly top-down.
+    ctx.globalAlpha = 0.85;
     const label = it.name.length > 14 ? it.name.slice(0, 12) + "…" : it.name;
-    ctx.fillStyle = "rgba(0,0,0,0.6)";
     const tw = ctx.measureText(label).width;
-    ctx.fillRect(px + 4, py - 4, tw + 4, 9);
+    const labelH = 9;
+    const labelY = py - 10 - stackIdx * (labelH + 2);
+    const labelX = px - (tw + 6) / 2;
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(labelX, labelY, tw + 6, labelH);
     ctx.fillStyle = "#e8c86a";
-    ctx.fillText(label, px + 6, py + 1);
+    ctx.fillText(label, labelX + 3, labelY + labelH / 2);
+    // Connecting tether so the label visibly belongs to the dot.
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = "#e8c86a";
+    ctx.fillRect(px - 0.5, labelY + labelH, 1, py - (labelY + labelH) - 1);
   }
   ctx.restore();
 }
@@ -2058,6 +2094,7 @@ function drawScene(
     palette?: Record<string, { name: string; color: string; walkable: boolean; glow?: boolean }>;
   },
   now: number,
+  band?: { topRow: number; bottomRow: number },
 ) {
   const rows = scene.map.length;
   const cols = scene.map[0]?.length ?? 0;
@@ -2066,7 +2103,14 @@ function drawScene(
   const worldH = rows * TILE_PX;
   const floorPx = (floorY + 1) * TILE_PX;
 
-  // Vertical gradient background: night sky → interior → foundation.
+  // Interior band bounds in world pixels. Fall back to the whole map when
+  // the caller doesn't pass a band (keeps older call sites working).
+  const bandTopPx = (band?.topRow ?? 0) * TILE_PX;
+  const bandBottomPx = (band?.bottomRow ?? rows) * TILE_PX;
+
+  // Vertical gradient background: interior dusk → floor line → foundation.
+  // Stops are expressed as fractions of worldH so the existing gradient
+  // reuses the same coordinate system as the rest of the scene.
   const bgGrad = ctx.createLinearGradient(0, 0, 0, worldH);
   bgGrad.addColorStop(0, "#12182a");
   const interiorStart = Math.max(0, (floorPx - TILE_PX * 6) / worldH);
@@ -2077,6 +2121,30 @@ function drawScene(
   bgGrad.addColorStop(1, "#05030a");
   ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, worldW, worldH);
+
+  // Back-wall wash inside the visible band: soft vertical plank stripes
+  // so the interior reads as an enclosed space instead of open sky.
+  const backTop = Math.max(bandTopPx, 0);
+  const backBottom = Math.min(bandBottomPx, floorPx);
+  if (backBottom > backTop) {
+    ctx.fillStyle = "rgba(60,42,24,0.08)";
+    ctx.fillRect(0, backTop, worldW, backBottom - backTop);
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    for (let x = TILE_PX; x < worldW; x += TILE_PX) {
+      ctx.fillRect(x, backTop, 1, backBottom - backTop);
+    }
+    ctx.fillStyle = "rgba(210,170,110,0.06)";
+    for (let x = TILE_PX; x < worldW; x += TILE_PX) {
+      ctx.fillRect(x - 1, backTop, 1, backBottom - backTop);
+    }
+    // Ceiling shadow band at the top of the interior.
+    const capH = Math.min(TILE_PX / 2, backBottom - backTop);
+    const capGrad = ctx.createLinearGradient(0, backTop, 0, backTop + capH);
+    capGrad.addColorStop(0, "rgba(0,0,0,0.45)");
+    capGrad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = capGrad;
+    ctx.fillRect(0, backTop, worldW, capH);
+  }
 
   // Tiles
   for (let r = 0; r < rows; r++) {
@@ -2091,6 +2159,41 @@ function drawScene(
         neighborBelow: scene.map[r + 1]?.[c] ?? " ",
       };
       drawTile(ctx, c, r, ch, now, sctx, scene.palette);
+    }
+  }
+
+  // Floor plank surface: a visible horizontal line so characters read as
+  // standing ON the floor, not floating. Only paint over walkable columns
+  // (don't overdraw walls/doors/hearth bases).
+  {
+    const plankTopY = floorY * TILE_PX;
+    const plankBodyH = TILE_PX;
+    const floorRow = scene.map[floorY] ?? "";
+    for (let c = 0; c < cols; c++) {
+      const ch = floorRow[c] ?? " ";
+      // Skip tiles that already render their own base (walls, doors, hearth,
+      // furniture with palette entries). Walk only paints over air/floor.
+      if (ch !== "." && ch !== " ") continue;
+      const x = c * TILE_PX;
+      // Plank boards
+      ctx.fillStyle = "#2a1d12";
+      ctx.fillRect(x, plankTopY, TILE_PX, plankBodyH);
+      // Woodgrain highlight strip (very top — catches a rim of light)
+      ctx.fillStyle = "rgba(200,150,90,0.22)";
+      ctx.fillRect(x, plankTopY, TILE_PX, 2);
+      ctx.fillStyle = "rgba(230,180,110,0.35)";
+      ctx.fillRect(x, plankTopY, TILE_PX, 1);
+      // Plank seams
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(x, plankTopY, 1, plankBodyH);
+      // Faint grain lines
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      for (let gy = 6; gy < plankBodyH - 2; gy += 9) {
+        ctx.fillRect(x + ((c * 7 + gy) % (TILE_PX - 4)), plankTopY + gy, 3, 1);
+      }
+      // Baseboard shadow just under the plank top for contact depth
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(x, plankTopY + 3, TILE_PX, 1);
     }
   }
 
@@ -2365,8 +2468,11 @@ function drawCharacter(
   now: number,
   all?: Character[],
 ) {
-  // Overlap nudge: spread characters sharing the same x horizontally.
+  // Overlap nudge: spread characters sharing the same x horizontally, and
+  // stagger their overhead labels vertically so nameplates / speech bubbles
+  // don't stack on top of each other.
   let xOffset = 0;
+  let labelStackOffset = 0;
   if (all) {
     const here = all.filter((o) => !o.dead && Math.abs(o.pos.x - c.pos.x) < 0.6);
     if (here.length > 1) {
@@ -2374,6 +2480,7 @@ function drawCharacter(
       const idx = sorted.findIndex((o) => o.id === c.id);
       const mid = (sorted.length - 1) / 2;
       xOffset = Math.round((idx - mid) * 7);
+      labelStackOffset = idx * 12;
     }
   }
 
@@ -2422,14 +2529,16 @@ function drawCharacter(
     ctx.arc(feetX - 12, feetY - 6, 4, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
+    // Nameplate floats above the body so dead characters read as "here".
     ctx.font = "9px ui-monospace, SF Mono, monospace";
     ctx.textBaseline = "top";
     ctx.textAlign = "center";
     const nameW = Math.min(90, ctx.measureText(c.name).width + 10);
+    const deadNameY = feetY - 20 - labelStackOffset;
     ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(feetX - nameW / 2, feetY + 3, nameW, 10);
+    ctx.fillRect(feetX - nameW / 2, deadNameY, nameW, 10);
     ctx.fillStyle = "#7a7a7a";
-    ctx.fillText(c.name, feetX, feetY + 4);
+    ctx.fillText(c.name, feetX, deadNameY + 1);
     ctx.textAlign = "start";
     return;
   }
@@ -2515,31 +2624,33 @@ function drawCharacter(
     ctx.restore();
   }
 
-  // Labels (screen-axis, above/below the sprite).
+  // Labels now stack ABOVE the head (RPG convention) so they don't collide
+  // with item labels sitting on the same floor row.
   ctx.font = "9px ui-monospace, SF Mono, monospace";
   ctx.textBaseline = "top";
   ctx.textAlign = "center";
   const nameW = Math.min(90, ctx.measureText(c.name).width + 10);
-  ctx.fillStyle = "rgba(0,0,0,0.55)";
-  ctx.fillRect(feetX - nameW / 2, feetY + 3, nameW, 10);
+  const nameY = headCy - headR - 12 - labelStackOffset;
+  ctx.fillStyle = "rgba(0,0,0,0.65)";
+  ctx.fillRect(feetX - nameW / 2, nameY, nameW, 10);
   ctx.fillStyle = c.palette.accent;
-  ctx.fillText(c.name, feetX, feetY + 4);
+  ctx.fillText(c.name, feetX, nameY + 1);
   ctx.textAlign = "start";
 
-  // HP pips beneath the name band.
+  // HP pips tucked to the right of the nameplate.
   for (let i = 0; i < 3; i++) {
     ctx.fillStyle = i < c.hp ? "#5ec26a" : "#3a3a3a";
-    ctx.fillRect(feetX + nameW / 2 - 3 - i * 4, feetY + 15, 3, 3);
+    ctx.fillRect(feetX + nameW / 2 + 2 + i * 4, nameY + 3, 3, 3);
   }
 
-  // Inventory label above the head.
+  // Inventory label sits one row above the nameplate.
   if (c.inventory.length > 0) {
     const itemName = c.inventory[0].length > 12
       ? c.inventory[0].slice(0, 10) + "…"
       : c.inventory[0];
     ctx.font = "7px ui-monospace, SF Mono, monospace";
     const iw = ctx.measureText(itemName).width + 6;
-    const iy = headCy - headR - 11;
+    const iy = nameY - 11;
     ctx.fillStyle = "rgba(232, 200, 106, 0.25)";
     ctx.fillRect(feetX - iw / 2, iy, iw, 9);
     ctx.fillStyle = "#e8c86a";
@@ -2552,9 +2663,10 @@ function drawCharacter(
     }
   }
 
-  // Emote + speech above the head.
-  if (c.emote) drawEmote(ctx, feetX, headCy - headR - 14, c.emote.kind, now);
-  if (c.speech) drawSpeech(ctx, feetX, headCy - headR - 24, c.speech.text);
+  // Emote + speech float further above the head.
+  const inventoryOffset = c.inventory.length > 0 ? 13 : 0;
+  if (c.emote) drawEmote(ctx, feetX, nameY - 14 - inventoryOffset, c.emote.kind, now);
+  if (c.speech) drawSpeech(ctx, feetX, nameY - 24 - inventoryOffset, c.speech.text);
 }
 
 function drawSpeech(ctx: CanvasRenderingContext2D, cx: number, cy: number, text: string) {
@@ -2712,8 +2824,9 @@ function drawDialog(
   const boxY = H - boxH - 6;
   const boxW = W - 12;
 
-  // Semi-transparent tint so the scene shows through
-  ctx.fillStyle = "rgba(11, 10, 22, 0.45)";
+  // Scene is clipped above the dialog now, so the box no longer overlaps
+  // characters. A deeper background keeps the typography readable.
+  ctx.fillStyle = "rgba(11, 10, 22, 0.88)";
   ctx.fillRect(boxX, boxY, boxW, boxH);
   // Gold frame drawn as stroked rects (scene still visible inside)
   ctx.fillStyle = "#e8c86a";

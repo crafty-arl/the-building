@@ -1,0 +1,49 @@
+- generic [ref=e2]:
+  - generic [ref=e6]:
+    - generic [ref=e7]:
+      - button "Back to the building" [ref=e9] [cursor=pointer]: ‹
+      - generic [ref=e10]:
+        - heading "FLOOR 1" [level=1] [ref=e11]
+        - generic [ref=e12]: A forgotten photograph
+      - generic "02:27, small hours" [ref=e99]:
+        - generic [ref=e15]: 02:27
+        - generic [ref=e16]: small hours
+    - generic "Tension 3" [ref=e100]:
+      - generic [ref=e18]: TENSION
+      - generic [ref=e21]: "3"
+    - note [ref=e22]: THE STAKESA memory is lost
+    - generic [ref=e23]:
+      - generic "Click to skip this line" [ref=e66] [cursor=pointer]
+      - complementary "Cast" [ref=e26]:
+        - generic [ref=e27]:
+          - generic [ref=e28]: THE CAST
+          - generic [ref=e29]: "2"
+        - generic [ref=e30]:
+          - generic [ref=e31]:
+            - generic [ref=e33]: Kaida Black
+            - generic [ref=e34]: · withdrawn
+          - generic [ref=e35]: late 20s, compact, speaks in a low, even tone
+          - generic [ref=e36]: "carries: Old Photograph"
+          - generic [ref=e37]: "wants: Kaida wants to find the photograph that was taken on their last day with their sister, but somehow never kept"
+        - generic [ref=e38]:
+          - generic [ref=e39]:
+            - generic [ref=e41]: Caspian Grey
+            - generic [ref=e42]: · withdrawn
+          - generic [ref=e43]: early 40s, lanky, tends to interrupt with a nervous laugh
+          - generic [ref=e44]: "carries: Empty Frame, torn photograph"
+          - generic [ref=e45]: "wants: Caspian needs to clear the room of all personal belongings before the end of the day, including any mysterious photographs"
+    - status [ref=e67]: Kaida's eyes follow the pieces of the photograph as they settle on the floor.
+  - generic [ref=e46]:
+    - generic [ref=e47]:
+      - generic [ref=e49]: What happens next
+      - textbox "What happens next" [active] [ref=e50]:
+        - /placeholder: What happens next?
+      - button "Submit" [disabled] [ref=e51]: ↑
+    - generic [ref=e52]:
+      - button "Menu" [ref=e53] [cursor=pointer]: ☰
+      - group "Playback" [ref=e54]:
+        - button "Rewind" [ref=e55] [cursor=pointer]: ⟲
+        - button "Pause" [ref=e56] [cursor=pointer]: ❚❚
+        - button "Skip line" [ref=e57] [cursor=pointer]: ⏭
+        - button "1×" [ref=e58] [cursor=pointer]
+        - button "☰" [ref=e59] [cursor=pointer]

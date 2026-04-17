@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { RoomSchema, MapSchema } from "../index";
+import { RoomSchema, MapSchema, repairFurniturePlacement } from "../index";
 
 // A baseline valid side-view room: 24 cols × 10 rows, floor_y=7, ceiling
 // cap, foundation below the floor, door on the floor row, two windows,
@@ -118,9 +118,22 @@ describe("MapSchema", () => {
     expect(r.success).toBe(false);
   });
 
-  it("accepts custom tiles when declared in palette", () => {
+  it("accepts custom tiles above floor when palette opts into aboveFloor", () => {
     const custom = validMap.map.slice();
     custom[3] = "#...X" + ".".repeat(18) + "#";
+    const r = MapSchema.safeParse({
+      ...validMap,
+      map: custom,
+      palette: {
+        X: { name: "banner", color: "#aabbcc", walkable: false, aboveFloor: true },
+      },
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("accepts custom tiles on the floor row without aboveFloor", () => {
+    const custom = validMap.map.slice();
+    custom[7] = custom[7].slice(0, 2) + "X" + custom[7].slice(3);
     const r = MapSchema.safeParse({
       ...validMap,
       map: custom,
@@ -129,5 +142,126 @@ describe("MapSchema", () => {
       },
     });
     expect(r.success).toBe(true);
+  });
+
+  it("rejects furniture floating above floor_y", () => {
+    const floating = validMap.map.slice();
+    floating[6] = "#...t..................#";
+    const r = MapSchema.safeParse({ ...validMap, map: floating });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(JSON.stringify(r.error.issues)).toMatch(/furniture/);
+    }
+  });
+
+  it("rejects palette glyph above floor without aboveFloor opt-in", () => {
+    const custom = validMap.map.slice();
+    custom[3] = "#...X" + ".".repeat(18) + "#";
+    const r = MapSchema.safeParse({
+      ...validMap,
+      map: custom,
+      palette: {
+        X: { name: "shrine", color: "#aabbcc", walkable: false },
+      },
+    });
+    expect(r.success).toBe(false);
+  });
+});
+
+describe("repairFurniturePlacement", () => {
+  const floor_y = 7;
+  const mkMap = (rows: string[]): string[] => rows.slice();
+
+  it("moves floating table/chair/bed down to floor_y", () => {
+    const input = mkMap([
+      "########################",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#..t..c..b..............#".slice(0, 24),
+      "#......................#",
+      "#......................|",
+      "########################",
+      "########################",
+    ]);
+    const out = repairFurniturePlacement(input, floor_y);
+    expect(out[5]).not.toMatch(/[tcb]/);
+    expect(out[7]).toMatch(/t/);
+    expect(out[7]).toMatch(/c/);
+    expect(out[7]).toMatch(/b/);
+  });
+
+  it("drops stray furniture when the floor cell below is occupied", () => {
+    const input = mkMap([
+      "########################",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#....t.................#",
+      "#......................#",
+      "#......................#",
+      "######................|.",
+      "########################",
+      "########################",
+    ]);
+    const out = repairFurniturePlacement(input, floor_y);
+    expect(out[4][5]).toBe(".");
+    expect(out[7][5]).toBe("#");
+  });
+
+  it("leaves above-floor core glyphs untouched", () => {
+    const input = mkMap([
+      "########################",
+      "#......R...............#",
+      "#......................#",
+      "#...w..........l.......#",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#....b..t....c.........|",
+      "########################",
+      "########################",
+    ]);
+    const out = repairFurniturePlacement(input, floor_y);
+    expect(out[1]).toBe(input[1]);
+    expect(out[3]).toBe(input[3]);
+  });
+
+  it("respects palette aboveFloor opt-in", () => {
+    const input = mkMap([
+      "########################",
+      "#......B...............#",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#......................|",
+      "########################",
+      "########################",
+    ]);
+    const palette = { B: { walkable: false, aboveFloor: true } };
+    const out = repairFurniturePlacement(input, floor_y, palette);
+    expect(out[1]).toBe(input[1]);
+  });
+
+  it("moves a walkable palette glyph (rug-like) to floor_y", () => {
+    const input = mkMap([
+      "########################",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#......................#",
+      "#....S.................#",
+      "#......................|",
+      "########################",
+      "########################",
+    ]);
+    const palette = { S: { walkable: true, aboveFloor: false } };
+    const out = repairFurniturePlacement(input, floor_y, palette);
+    expect(out[6][5]).toBe(".");
+    expect(out[7][5]).toBe("S");
   });
 });

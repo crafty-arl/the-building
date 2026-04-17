@@ -1,0 +1,39 @@
+- generic [ref=e2]:
+  - generic [ref=e15]:
+    - generic [ref=e70]:
+      - heading "THE BUILDING" [level=1] [ref=e71]
+      - generic [ref=e72]:
+        - generic [ref=e73]: 1 FLOOR
+        - generic [ref=e75]: FLOOR 1 LIVE
+        - generic [ref=e77]: 0 SURVIVORS
+        - generic [ref=e79]: 0 CH · FIRST RAIN
+    - list "The building" [ref=e80]:
+      - button "Add a new floor" [ref=e81] [cursor=pointer]:
+        - generic [ref=e82]:
+          - generic [ref=e83]: ADD A FLOOR
+          - generic [ref=e84]: build upward · deal ingredients
+        - generic [ref=e85]: +
+      - listitem [ref=e86]:
+        - generic [ref=e87]: "1"
+        - generic [ref=e88]:
+          - generic [ref=e90]:
+            - generic [ref=e91]: Kitchen at Dawn's Edge
+            - generic [ref=e92]: IN PROGRESS · TENSION 0
+            - generic [ref=e93]:
+              - generic [ref=e94]: Kaelin
+              - generic [ref=e96]: Zephyr
+          - button "ENTER ›" [ref=e98] [cursor=pointer]
+      - generic [ref=e99]: FOUNDED JUST NOW
+  - generic [ref=e100]:
+    - button "◉ PROFILE" [ref=e101] [cursor=pointer]:
+      - generic [ref=e102]: ◉
+      - generic [ref=e103]: PROFILE
+    - button "☼ SEASON" [ref=e104] [cursor=pointer]:
+      - generic [ref=e105]: ☼
+      - generic [ref=e106]: SEASON
+    - button "⚙ SETTINGS" [ref=e107] [cursor=pointer]:
+      - generic [ref=e108]: ⚙
+      - generic [ref=e109]: SETTINGS
+    - button "⌂ BUILDING" [pressed] [ref=e110] [cursor=pointer]:
+      - generic [ref=e111]: ⌂
+      - generic [ref=e112]: BUILDING

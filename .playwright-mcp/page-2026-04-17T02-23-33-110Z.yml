@@ -1,0 +1,47 @@
+- generic [ref=e2]:
+  - generic [ref=e6]:
+    - generic [ref=e159]:
+      - button "Back to the building" [ref=e187] [cursor=pointer]: ‹
+      - generic [ref=e188]:
+        - heading "FLOOR 1" [level=1] [ref=e189]
+        - generic [ref=e190]: A forgotten photograph
+      - generic "00:20, night" [ref=e192]:
+        - generic [ref=e193]: 00:20
+        - generic [ref=e194]: night
+    - generic "Tension 0" [ref=e195]:
+      - generic [ref=e196]: TENSION
+      - generic [ref=e198]: "0"
+    - note [ref=e199]: THE STAKESA memory is lost
+    - generic [ref=e200]:
+      - generic "Click to skip this line" [ref=e202] [cursor=pointer]
+      - complementary "Cast" [ref=e203]:
+        - generic [ref=e204]:
+          - generic [ref=e205]: THE CAST
+          - generic [ref=e206]: "2"
+        - generic [ref=e207]:
+          - generic [ref=e208]:
+            - generic [ref=e210]: Kaida Black
+            - generic [ref=e211]: · watchful
+          - generic [ref=e212]: late 20s, compact, speaks in a low, even tone
+          - generic [ref=e213]: "wants: Kaida wants to find the photograph that was taken on their last day with their sister, but somehow never kept"
+        - generic [ref=e214]:
+          - generic [ref=e215]:
+            - generic [ref=e217]: Caspian Grey
+            - generic [ref=e218]: · weary
+          - generic [ref=e219]: early 40s, lanky, tends to interrupt with a nervous laugh
+          - generic [ref=e220]: "wants: Caspian needs to clear the room of all personal belongings before the end of the day, including any mysterious photographs"
+    - status [ref=e221]: Kaida bends down to pick up the photograph.
+  - generic [ref=e167]:
+    - generic [ref=e222]:
+      - generic [ref=e224]: What happens next
+      - textbox "What happens next" [ref=e225]:
+        - /placeholder: What happens next?
+      - button "Submit" [disabled] [ref=e226]: ↑
+    - generic [ref=e227]:
+      - button "Menu" [ref=e228] [cursor=pointer]: ☰
+      - group "Playback" [ref=e229]:
+        - button "Rewind" [disabled] [ref=e230]: ⟲
+        - button "Pause" [ref=e231] [cursor=pointer]: ❚❚
+        - button "Skip line" [ref=e232] [cursor=pointer]: ⏭
+        - button "1×" [ref=e233] [cursor=pointer]
+        - button "☰" [ref=e234] [cursor=pointer]
