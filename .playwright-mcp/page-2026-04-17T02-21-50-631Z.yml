@@ -1,0 +1,166 @@
+- generic [ref=e2]:
+  - generic [ref=e6]:
+    - generic [ref=e7]:
+      - generic [ref=e8]:
+        - heading "NEW FLOOR" [level=1] [ref=e9]
+        - generic [ref=e10]: deal 2 to 6 ingredients
+      - button "⤨" [ref=e12] [cursor=pointer]
+    - generic [ref=e14]:
+      - generic [ref=e15]:
+        - generic [ref=e16]: the place
+        - generic [ref=e17]:
+          - button "▦ a kitchen at the edge of morning" [ref=e18] [cursor=pointer]:
+            - generic [ref=e19]: ▦
+            - generic [ref=e20]: a kitchen at the edge of morning
+          - button "△ an attic that was sealed for years" [ref=e21] [cursor=pointer]:
+            - generic [ref=e22]: △
+            - generic [ref=e23]: an attic that was sealed for years
+          - button "▢ a locked vault, from the inside" [ref=e24] [cursor=pointer]:
+            - generic [ref=e25]: ▢
+            - generic [ref=e26]: a locked vault, from the inside
+          - button "† a small chapel after the funeral" [ref=e27] [cursor=pointer]:
+            - generic [ref=e28]: †
+            - generic [ref=e29]: a small chapel after the funeral
+          - button "═ a sleeper car on a train that won't stop" [ref=e30] [cursor=pointer]:
+            - generic [ref=e31]: ═
+            - generic [ref=e32]: a sleeper car on a train that won't stop
+          - button "◌ a cellar lit by a single lamp" [ref=e33] [cursor=pointer]:
+            - generic [ref=e34]: ◌
+            - generic [ref=e35]: a cellar lit by a single lamp
+          - button "⌒ a rooftop under low cloud" [ref=e36] [cursor=pointer]:
+            - generic [ref=e37]: ⌒
+            - generic [ref=e38]: a rooftop under low cloud
+          - button "✚ a small clinic in the quiet hour" [ref=e39] [cursor=pointer]:
+            - generic [ref=e40]: ✚
+            - generic [ref=e41]: a small clinic in the quiet hour
+      - generic [ref=e42]:
+        - generic [ref=e43]: the company
+        - generic [ref=e44]:
+          - button "? a stranger at the door" [ref=e45] [cursor=pointer]:
+            - generic [ref=e46]: "?"
+            - generic [ref=e47]: a stranger at the door
+          - button "◉ someone they used to be" [ref=e48] [cursor=pointer]:
+            - generic [ref=e49]: ◉
+            - generic [ref=e50]: someone they used to be
+          - button "∞ a sibling they haven't spoken to" [ref=e51] [cursor=pointer]:
+            - generic [ref=e52]: ∞
+            - generic [ref=e53]: a sibling they haven't spoken to
+          - button "○ a child too young to know" [ref=e54] [cursor=pointer]:
+            - generic [ref=e55]: ○
+            - generic [ref=e56]: a child too young to know
+          - button "$ the one they owe" [ref=e57] [cursor=pointer]:
+            - generic [ref=e58]: $
+            - generic [ref=e59]: the one they owe
+          - button "✺ the one who left" [ref=e60] [cursor=pointer]:
+            - generic [ref=e61]: ✺
+            - generic [ref=e62]: the one who left
+          - button "✦ a teacher now frail" [ref=e63] [cursor=pointer]:
+            - generic [ref=e64]: ✦
+            - generic [ref=e65]: a teacher now frail
+      - generic [ref=e66]:
+        - generic [ref=e67]: the object
+        - generic [ref=e68]:
+          - button "✉ an unopened letter" [ref=e69] [cursor=pointer]:
+            - generic [ref=e70]: ✉
+            - generic [ref=e71]: an unopened letter
+          - button "⚷ a key that fits nothing here" [ref=e72] [cursor=pointer]:
+            - generic [ref=e73]: ⚷
+            - generic [ref=e74]: a key that fits nothing here
+          - button "▣ a photograph they didn't keep" [ref=e75] [cursor=pointer]:
+            - generic [ref=e76]: ▣
+            - generic [ref=e77]: a photograph they didn't keep
+          - button "ǁ a blade kept clean for a reason" [ref=e78] [cursor=pointer]:
+            - generic [ref=e79]: ǁ
+            - generic [ref=e80]: a blade kept clean for a reason
+          - button "◎ a worn coin with the edge rubbed soft" [ref=e81] [cursor=pointer]:
+            - generic [ref=e82]: ◎
+            - generic [ref=e83]: a worn coin with the edge rubbed soft
+          - button "ϊ a candle burning too fast" [ref=e84] [cursor=pointer]:
+            - generic [ref=e85]: ϊ
+            - generic [ref=e86]: a candle burning too fast
+          - button "☖ a recipe in someone else's hand" [ref=e87] [cursor=pointer]:
+            - generic [ref=e88]: ☖
+            - generic [ref=e89]: a recipe in someone else's hand
+      - generic [ref=e90]:
+        - generic [ref=e91]: the hour
+        - generic [ref=e92]:
+          - button "☼ the last hour before dawn" [ref=e93] [cursor=pointer]:
+            - generic [ref=e94]: ☼
+            - generic [ref=e95]: the last hour before dawn
+          - button "❄ winter arriving in earnest" [ref=e96] [cursor=pointer]:
+            - generic [ref=e97]: ❄
+            - generic [ref=e98]: winter arriving in earnest
+          - button "☁ the night of the storm" [ref=e99] [cursor=pointer]:
+            - generic [ref=e100]: ☁
+            - generic [ref=e101]: the night of the storm
+          - button "◐ the morning after the feast" [ref=e102] [cursor=pointer]:
+            - generic [ref=e103]: ◐
+            - generic [ref=e104]: the morning after the feast
+          - button "✟ a funeral day" [ref=e105] [cursor=pointer]:
+            - generic [ref=e106]: ✟
+            - generic [ref=e107]: a funeral day
+          - button "✩ a birthday nobody mentioned" [ref=e108] [cursor=pointer]:
+            - generic [ref=e109]: ✩
+            - generic [ref=e110]: a birthday nobody mentioned
+      - generic [ref=e111]:
+        - generic [ref=e112]: the weather
+        - generic [ref=e113]:
+          - button "~ a long held breath" [ref=e114] [cursor=pointer]:
+            - generic [ref=e115]: ~
+            - generic [ref=e116]: a long held breath
+          - button "… something waiting to be said" [ref=e117] [cursor=pointer]:
+            - generic [ref=e118]: …
+            - generic [ref=e119]: something waiting to be said
+          - button "∅ a silence that stopped being polite" [ref=e120] [cursor=pointer]:
+            - generic [ref=e121]: ∅
+            - generic [ref=e122]: a silence that stopped being polite
+          - button "╱ gentle, unhurried rain" [ref=e123] [cursor=pointer]:
+            - generic [ref=e124]: ╱
+            - generic [ref=e125]: gentle, unhurried rain
+          - button "▽ a slow fire, attentive" [ref=e126] [cursor=pointer]:
+            - generic [ref=e127]: ▽
+            - generic [ref=e128]: a slow fire, attentive
+          - button "〜 wind at the eaves" [ref=e129] [cursor=pointer]:
+            - generic [ref=e130]: 〜
+            - generic [ref=e131]: wind at the eaves
+      - generic [ref=e132]:
+        - generic [ref=e133]: the trouble
+        - generic [ref=e134]:
+          - button "◈ money owed, not mentioned" [ref=e135] [cursor=pointer]:
+            - generic [ref=e136]: ◈
+            - generic [ref=e137]: money owed, not mentioned
+          - button "✕ a lie that has outlasted its usefulness" [ref=e138] [cursor=pointer]:
+            - generic [ref=e139]: ✕
+            - generic [ref=e140]: a lie that has outlasted its usefulness
+          - button "⊘ a promise neither wants to keep" [ref=e141] [cursor=pointer]:
+            - generic [ref=e142]: ⊘
+            - generic [ref=e143]: a promise neither wants to keep
+          - button "➤ a footstep approaching the door" [ref=e144] [cursor=pointer]:
+            - generic [ref=e145]: ➤
+            - generic [ref=e146]: a footstep approaching the door
+          - button "⟿ an argument they paused three days ago" [ref=e147] [cursor=pointer]:
+            - generic [ref=e148]: ⟿
+            - generic [ref=e149]: an argument they paused three days ago
+          - button "◆ a secret that just became visible" [ref=e150] [cursor=pointer]:
+            - generic [ref=e151]: ◆
+            - generic [ref=e152]: a secret that just became visible
+    - generic [ref=e153]:
+      - textbox "your prompt appears here — or write your own" [ref=e155]
+      - button "IGNITE open floor 1 ⟶" [disabled] [ref=e156]:
+        - generic [ref=e157]:
+          - generic [ref=e158]: IGNITE
+          - generic [ref=e159]: open floor 1
+        - generic [ref=e160]: ⟶
+  - generic [ref=e162]:
+    - button "◉ PROFILE" [ref=e163] [cursor=pointer]:
+      - generic [ref=e164]: ◉
+      - generic [ref=e165]: PROFILE
+    - button "☼ SEASON" [ref=e166] [cursor=pointer]:
+      - generic [ref=e167]: ☼
+      - generic [ref=e168]: SEASON
+    - button "⚙ SETTINGS" [ref=e169] [cursor=pointer]:
+      - generic [ref=e170]: ⚙
+      - generic [ref=e171]: SETTINGS
+    - button "⌂ BUILDING" [active] [pressed] [ref=e172] [cursor=pointer]:
+      - generic [ref=e173]: ⌂
+      - generic [ref=e174]: BUILDING
