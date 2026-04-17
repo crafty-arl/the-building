@@ -388,18 +388,27 @@ button {
 .main-col {
   flex: 1;
   overflow-y: auto;
-  padding: 0 40px;
+  padding: 0 32px;
   display: flex;
   justify-content: center;
 }
 
 .reading-pane {
-  width: 640px;
+  width: 880px;
   max-width: 100%;
   padding: 40px 0;
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+@media (min-width: 1280px) {
+  .reading-pane {
+    width: 960px;
+  }
+  .prose-paragraph {
+    font-size: 21px;
+  }
 }
 
 .scene-top {
@@ -435,7 +444,7 @@ button {
 
 .prose-paragraph {
   font-family: "Crimson Pro", Georgia, serif;
-  font-size: 19px;
+  font-size: 20px;
   font-weight: 400;
   line-height: 1.55;
   color: var(--prose-cream);
@@ -1005,8 +1014,54 @@ button {
 }
 
 @media (max-width: 639px) {
+  /* Full-bleed: prose fills the viewport, controls float on top as a HUD. */
+  .reactor {
+    grid-template-rows: 100dvh;
+    position: relative;
+    min-height: 100dvh;
+  }
+
+  .rule-row {
+    display: none;
+  }
+
+  .body {
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .main-col {
+    padding: 0;
+    height: 100dvh;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .reading-pane {
+    width: 100%;
+    max-width: 100%;
+    padding: calc(72px + env(safe-area-inset-top)) 20px
+      calc(140px + env(safe-area-inset-bottom));
+    gap: 16px;
+  }
+
+  .prose-paragraph {
+    font-size: 17px;
+  }
+
+  /* Top bar: floating, translucent */
   .topbar {
-    padding: 0 16px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    padding: env(safe-area-inset-top) 16px 0;
+    background: rgba(8, 9, 16, 0.55);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--rule-faint);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+    z-index: 50;
   }
   .live-label {
     display: none;
@@ -1022,7 +1077,7 @@ button {
     display: none;
   }
 
-  /* Rail: hide inline; expanded becomes fullscreen overlay */
+  /* Rail: hide inline; expanded becomes fullscreen overlay above the HUD */
   .claw-rail.collapsed {
     display: none;
   }
@@ -1030,30 +1085,27 @@ button {
     position: fixed;
     inset: 0;
     width: 100%;
-    z-index: 95;
+    z-index: 110;
     border-right: 0;
   }
 
-  .main-col {
-    padding: 0;
-  }
-
-  .reading-pane {
-    padding: 24px 20px;
-    gap: 16px;
-    width: 100%;
-  }
-
-  .prose-paragraph {
-    font-size: 17px;
-  }
-
+  /* State strip: pill-shaped HUD chip floating above the DM bar */
   .statestrip {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: calc(64px + env(safe-area-inset-bottom) + 8px);
     height: auto;
-    padding: 8px 16px;
+    padding: 6px 14px;
     flex-direction: column;
     gap: 6px;
     align-items: stretch;
+    background: rgba(10, 11, 16, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--rule-faint);
+    border-radius: 16px;
+    z-index: 50;
   }
   .hud-left {
     justify-content: flex-start;
@@ -1065,17 +1117,26 @@ button {
     gap: 10px;
     flex-wrap: wrap;
   }
-  .reactor {
-    grid-template-rows: 56px 1px 1fr 1px auto 1px 64px;
-  }
 
+  /* DM bar: floating bottom HUD */
   .dmbar {
-    padding: 0 16px;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(64px + env(safe-area-inset-bottom));
+    padding: 0 16px env(safe-area-inset-bottom);
+    background: rgba(8, 9, 16, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-top: 1px solid var(--rule-faint);
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.35);
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     mask-image: linear-gradient(to right, #000 0, #000 90%, transparent 100%);
     justify-content: flex-start;
     gap: 8px;
+    z-index: 50;
   }
   .dmbar::-webkit-scrollbar {
     display: none;
@@ -1084,8 +1145,13 @@ button {
     flex: 0 0 auto;
   }
 
+  /* Hand drawer: above the floating HUD bars */
   .hand-drawer {
-    padding: 20px 16px 24px;
+    padding: 20px 16px calc(24px + env(safe-area-inset-bottom));
     max-height: 70vh;
+    z-index: 100;
+  }
+  .hand-drawer-backdrop {
+    z-index: 95;
   }
 }
