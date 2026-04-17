@@ -44,6 +44,10 @@ body,
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* PWA / standalone polish: kill tap highlight, rubber-band, and double-tap zoom. */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  touch-action: manipulation;
 }
 
 button {
