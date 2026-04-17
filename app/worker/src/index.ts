@@ -192,6 +192,7 @@ interface CharProfile {
 interface RoomResponse {
   name: string;
   map: string[];
+  floor_y: number;
   anchors: Record<string, [number, number]>;
   palette?: Record<string, { name: string; color: string; walkable: boolean; glow?: boolean }>;
   lines: string[];
@@ -200,6 +201,7 @@ interface RoomResponse {
   openingFlags?: Record<string, string>;
   moods?: { marrow?: string; soren?: string };
   profiles?: { marrow?: CharProfile; soren?: CharProfile };
+  projection?: "side";
 }
 
 const ROOM_PALETTE = new Set([
@@ -219,26 +221,30 @@ const WALKABLE = new Set([".", "|"]);
 
 const ROOM_SYSTEM = `You are a scenario composer for a quiet, understated tabletop RPG. The user prompts a room; you generate the full scenario — map, opening narration, discoverable items, stakes, character moods, and opening world flags. Think of yourself as the set designer, props manager, and dramaturg all at once. You are generating the STARTING CONDITIONS of a story.
 
-Tile palette (use ONLY these chars):
-  #  wall (must form the outer border, except for doors/windows/roof)
-  .  floor (walkable)
-  |  door (walkable, 1–3 in a row, placed in the wall)
-  ~  hearth (1–3 tiles clustered)
-  w  window (1–3 tiles, replaces wall on a side)
-  b  bed (1 tile, against a wall)
-  t  table (1–3 tiles, interior)
-  c  chair (1–2 tiles)
-  =  bar/counter (3–5 tiles in a line)
-  R  roof beam (top row replacement, only for outdoor scenes like porches)
-  l  lantern (1 tile, near a wall)
+The map is a SIDE-ELEVATION CROSS-SECTION — think of a dollhouse with one wall removed. The camera looks at the scene from the side. Characters walk horizontally along a single floor row. Everything above the floor is interior air, walls, ceiling, roof. Everything below the floor is foundation/underground. A required field 'floor_y' names the row (0-indexed) that characters stand on.
+
+Tile palette — side-view meanings (use ONLY these chars):
+  #  stone/plank wall column (outer shell + any interior wall)
+  .  air / walkable corridor above the floor; packed earth below the floor
+  |  door (walkable) — a cut-out in a wall column; place on the floor row
+  ~  hearth — flames sit at the floor row; usually attached to a '#' wall
+  w  window — 4-pane insert in a '#' wall column
+  b  bed — side profile, sits on the floor row
+  t  table — side profile, sits on the floor row
+  c  chair — side profile, sits on the floor row
+  =  bar/counter — side profile, sits on the floor row
+  R  roof beam — horizontal cap along the top row or just under the roof
+  l  lantern — hangs from a ceiling tile by a chain (place above the floor)
 
 Hard constraints:
-- The map is EXACTLY 16 columns × 11 rows. Every row is exactly 16 characters. There are exactly 11 rows.
-- The outer border is '#' wall except where replaced by doors '|', windows 'w', or roof 'R' for porches.
-- At least one door '|' must be present.
-- At least 30 walkable tiles ('.' or '|').
-- Every anchor coordinate [x,y] (x is column 0–15, y is row 0–10) must point to a walkable tile.
-- Include 4–8 anchors, named descriptively (e.g. hearth, window, table_a, door_in, chair_a, bar_a, center). Always include a 'center' anchor on a walkable interior tile.
+- Room dimensions: choose to fit the scene. Width 20–48 columns, height 8–14 rows. ALL rows identical length.
+- The outer frame is '#' (roof on top, foundation on bottom, walls on sides) except where replaced by '|' doors, 'w' windows, or 'R' beams.
+- 'floor_y' is an integer in [2, rows-2]. The row at index 'floor_y' must contain at least 8 walkable tiles ('.' or '|' or custom-walkable) — this is where characters walk.
+- At least one door '|' placed ON the 'floor_y' row.
+- At least 30 walkable tiles total across the map.
+- Every anchor coordinate [x,y] must be in bounds and point at a walkable tile.
+- "Stand here" anchors (center, door_in, table_side, chair_side, bed_side, hearth_side, etc.) MUST sit on 'floor_y'. "Visual" anchors that refer to wall-mounted features (hearth, window, lantern, ceiling_beam, chimney) MAY sit above 'floor_y'.
+- Include 4–8 anchors, named descriptively. Always include a 'center' anchor on 'floor_y'.
 - The 'name' is a 3–7 word scene description.
 - 'lines' contains 3–4 opening narration lines in this voice — quiet, understated, present tense, third person, no dialogue. Match: "The fire keeps its slow count."
 
@@ -263,7 +269,7 @@ Additional scenario fields (RECOMMENDED — skip only if irrelevant):
   Their profiles should CONFLICT or COMPLICATE each other — otherwise there's no story.
 
 Return STRICT JSON only, no preamble, no markdown, no commentary. Shape:
-{"name":"...","map":["################", ... 11 rows ...],"anchors":{"center":[x,y], ...},"lines":["...", "..."],"items":[{"name":"...","description":"...","anchor":"..."}],"stakes":"...","openingFlags":{"key":"value"},"moods":{"marrow":"...","soren":"..."},"profiles":{"marrow":{"name":"...","description":"...","palette":"warm","backstory":"...","objective":"...","motive":"..."},"soren":{"name":"...","description":"...","palette":"cool","backstory":"...","objective":"...","motive":"..."}}}`;
+{"name":"...","map":["########...", "#........#", ...],"floor_y":7,"anchors":{"center":[x,y], ...},"lines":["...", "..."],"items":[{"name":"...","description":"...","anchor":"..."}],"stakes":"...","openingFlags":{"key":"value"},"moods":{"marrow":"...","soren":"..."},"profiles":{"marrow":{"name":"...","description":"...","palette":"warm","backstory":"...","objective":"...","motive":"..."},"soren":{"name":"...","description":"...","palette":"cool","backstory":"...","objective":"...","motive":"..."}}}`;
 
 const PALETTE_CHARS = "#.|~wbtc=Rl";
 
@@ -272,11 +278,12 @@ const ItemSchema = z.object({
   description: z.string().min(1).max(160),
   anchor: z.string().min(1).max(40).optional(),
 });
-const RoomSchema = z.object({
+export const RoomSchema = z.object({
   name: z.string().min(1).max(80),
   map: z
-    .array(z.string().length(16))
-    .length(11)
+    .array(z.string().min(20).max(48))
+    .min(8)
+    .max(14)
     .refine((rows) => rows.some((r) => r.includes("|")), "must include a door '|'")
     .refine(
       (rows) =>
@@ -287,12 +294,18 @@ const RoomSchema = z.object({
     .refine(
       (rows) => rows.flatMap((r) => Array.from(r)).every((c) => PALETTE_CHARS.includes(c)),
       "all chars must be in the palette",
+    )
+    .refine(
+      (rows) => {
+        if (rows.length === 0) return false;
+        const w = rows[0].length;
+        return rows.every((r) => r.length === w);
+      },
+      "all rows must share the same width",
     ),
+  floor_y: z.number().int().min(2),
   anchors: z.record(
-    z.tuple([
-      z.number().int().min(0).max(15),
-      z.number().int().min(0).max(10),
-    ]),
+    z.tuple([z.number().int().min(0), z.number().int().min(0)]),
   ),
   lines: z.array(z.string().min(1)).min(2).max(6),
   items: z.array(ItemSchema).max(10).optional(),
@@ -329,6 +342,26 @@ const RoomSchema = z.object({
     })
     .optional(),
 }).superRefine((val, ctx) => {
+  const rows = val.map.length;
+  const cols = val.map[0]?.length ?? 0;
+  // floor_y must leave at least one row below for foundation.
+  if (val.floor_y >= rows - 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `floor_y must be < rows-1 (floor_y=${val.floor_y}, rows=${rows})`,
+      path: ["floor_y"],
+    });
+    return;
+  }
+  const floorRow = val.map[val.floor_y] ?? "";
+  const walkOnFloor = Array.from(floorRow).filter((c) => c === "." || c === "|").length;
+  if (walkOnFloor < 8) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `floor_y row needs ≥8 walkable chars, got ${walkOnFloor}`,
+      path: ["floor_y"],
+    });
+  }
   const center = val.anchors.center;
   if (!center) {
     ctx.addIssue({
@@ -339,16 +372,15 @@ const RoomSchema = z.object({
     return;
   }
   const [cx, cy] = center;
-  const row = val.map[cy];
-  if (!row) {
+  if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "anchors.center y out of range",
+      message: "anchors.center out of bounds",
       path: ["anchors", "center"],
     });
     return;
   }
-  const ch = row[cx];
+  const ch = val.map[cy]?.[cx];
   if (ch !== "." && ch !== "|") {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -362,27 +394,32 @@ type RoomSchemaOut = z.infer<typeof RoomSchema>;
 
 // Post-process a validated room: drop non-walkable anchors, top up to >=4,
 // clamp lines length. Returns the final RoomResponse the client expects.
-function postProcessRoom(val: RoomSchemaOut): RoomResponse {
+export function postProcessRoom(val: RoomSchemaOut): RoomResponse {
   const map = val.map;
+  const rows = map.length;
+  const cols = map[0]?.length ?? 0;
+  const floorY = val.floor_y;
   const anchors: Record<string, [number, number]> = {};
   for (const [k, v] of Object.entries(val.anchors)) {
     const [x, y] = v;
+    if (x < 0 || x >= cols || y < 0 || y >= rows) continue;
     const ch = map[y]?.[x];
     if (ch === "." || ch === "|") {
       anchors[k] = [x, y];
     }
   }
   if (!anchors.center) {
+    // Prefer the middle of the floor row.
+    const floorRow = map[floorY] ?? "";
+    const mid = Math.floor(cols / 2);
     let best: [number, number] | null = null;
     let bestD = Infinity;
-    for (let y = 0; y < 11; y++) {
-      for (let x = 0; x < 16; x++) {
-        if (!WALKABLE.has(map[y][x])) continue;
-        const d = Math.abs(x - 8) + Math.abs(y - 5);
-        if (d < bestD) {
-          bestD = d;
-          best = [x, y];
-        }
+    for (let x = 0; x < cols; x++) {
+      if (floorRow[x] !== "." && floorRow[x] !== "|") continue;
+      const d = Math.abs(x - mid);
+      if (d < bestD) {
+        bestD = d;
+        best = [x, floorY];
       }
     }
     if (best) anchors.center = best;
@@ -390,23 +427,22 @@ function postProcessRoom(val: RoomSchemaOut): RoomResponse {
   if (Object.keys(anchors).length < 4) {
     let added = 0;
     let i = 0;
-    for (let y = 1; y < 10 && added < 4; y++) {
-      for (let x = 1; x < 15 && added < 4; x++) {
-        if (!WALKABLE.has(map[y][x])) continue;
-        const name = `spot_${i++}`;
-        if (anchors[name]) continue;
-        anchors[name] = [x, y];
-        added++;
-      }
+    const floorRow = map[floorY] ?? "";
+    for (let x = 1; x < cols - 1 && added < 4; x++) {
+      if (floorRow[x] !== "." && floorRow[x] !== "|") continue;
+      const name = `spot_${i++}`;
+      if (anchors[name]) continue;
+      anchors[name] = [x, floorY];
+      added++;
     }
   }
-  // Keep items whose anchor (if set) is a valid walkable anchor we kept.
   const items = (val.items ?? [])
     .filter((it) => !it.anchor || anchors[it.anchor])
     .slice(0, 10);
   return {
     name: val.name,
     map,
+    floor_y: floorY,
     anchors,
     lines: val.lines.slice(0, 4),
     items,
@@ -414,6 +450,7 @@ function postProcessRoom(val: RoomSchemaOut): RoomResponse {
     openingFlags: val.openingFlags,
     moods: val.moods,
     profiles: val.profiles,
+    projection: "side",
   };
 }
 
@@ -428,18 +465,18 @@ function repairMap(
 ): string[] {
   if (!Array.isArray(rawMap)) return [];
   // Detect intended width from the first string row that has a plausible
-  // length. Default to 16 if none look reasonable.
+  // length. Default to 24 (a reasonable side-view width) if none look reasonable.
   const allowed = new Set<string>([...ROOM_PALETTE]);
   if (palette) for (const g of Object.keys(palette)) allowed.add(g);
-  let cols = 16;
+  let cols = 24;
   for (const r of rawMap) {
-    if (typeof r === "string" && r.length >= 12 && r.length <= 24) {
+    if (typeof r === "string" && r.length >= 20 && r.length <= 48) {
       cols = r.length;
       break;
     }
   }
-  // Clamp row count to [8, 16].
-  const rows = Math.max(8, Math.min(16, rawMap.length || 11));
+  // Clamp row count to [8, 14] for side-view rooms.
+  const rows = Math.max(8, Math.min(14, rawMap.length || 10));
   const out: string[] = [];
   for (let r = 0; r < rows; r++) {
     const raw = rawMap[r];
@@ -562,8 +599,10 @@ function validateRoom(r: unknown): { ok: true; value: RoomResponse } | { ok: fal
     value: {
       name: obj.name,
       map,
+      floor_y: Math.max(2, map.length - 2),
       anchors,
       lines: lines.slice(0, 4),
+      projection: "side",
     },
   };
 }
@@ -656,20 +695,22 @@ async function runRoomModel(env: Env, userPrompt: string): Promise<unknown> {
 
 // ─── Specialist system prompts (parallel room generation) ──────────────────
 
-const MAP_SYSTEM = `You are the MAP SPECIALIST for a quiet, understated tabletop RPG. You generate the spatial side of a room: its name, tile map, named anchors, and — if the room needs them — custom tile definitions.
+const MAP_SYSTEM = `You are the MAP SPECIALIST for a quiet, understated tabletop RPG. You generate the spatial side of a room: its name, tile map, the floor row index, named anchors, and — if the room needs them — custom tile definitions.
 
-CORE TILE GLYPHS (always available, do not redefine these):
-  #  wall (outer border, except where replaced by a door or window)
-  .  floor (walkable)
-  |  door (walkable, in the wall)
-  ~  hearth (not walkable)
-  w  window (not walkable, on a wall)
-  b  bed (not walkable)
-  t  table (not walkable)
-  c  chair (not walkable)
-  =  bar/counter (not walkable)
-  R  roof beam (top row replacement, for porches)
-  l  lantern (not walkable)
+The map is a SIDE-ELEVATION CROSS-SECTION — like a dollhouse with one wall removed. The camera looks at the scene from the side. Characters walk horizontally along a single "floor" row. Rows ABOVE that floor are interior air / walls / ceiling / roof. Rows BELOW are foundation / underground. You must emit a required integer field "floor_y" naming the 0-indexed row that characters stand on.
+
+CORE TILE GLYPHS — side-view meanings (always available, do not redefine):
+  #  stone/plank wall column; forms the outer frame and any interior wall
+  .  air (walkable when on the floor row, or corridor above floor); packed earth when below floor_y
+  |  door — a cut-out in a wall column. Place on the floor_y row. Walkable.
+  ~  hearth — flames sit at the floor row; usually attached to a '#' wall column
+  w  window — 4-pane insert in a '#' wall column; place above floor_y
+  b  bed — side profile, sits on the floor row (place AT floor_y)
+  t  table — side profile, sits on the floor row (place AT floor_y)
+  c  chair — side profile, sits on the floor row (place AT floor_y)
+  =  bar/counter — side profile, sits on the floor row (place AT floor_y)
+  R  roof beam — horizontal cap along the top row (or just under the roof)
+  l  lantern — hangs from a ceiling tile by a chain (place above floor_y)
 
 CUSTOM TILES (optional): if the room needs props the core palette doesn't cover — anvil, pew, altar, mast, loom, stove, workbench, barrel, crate, cauldron, pit, brazier, rug, shelf, piano, plant — invent glyphs and declare them in a "palette" object. Each custom glyph has:
   - A single non-core character (uppercase letters like A, E, F, M, P, S, etc.)
@@ -678,31 +719,34 @@ CUSTOM TILES (optional): if the room needs props the core palette doesn't cover 
   - walkable (boolean)
   - glow (boolean, optional — for warm light sources)
 
-Room dimensions are FLEXIBLE: map can be 12–24 columns wide × 8–16 rows tall. Pick a size that fits the room's purpose (a closet is small, a great hall is big). ALL rows must be the same length.
+Room dimensions are FLEXIBLE: 20–48 columns wide × 8–14 rows tall. Pick a size that fits the scene (a lonely shack might be narrow; a great hall or street-front stretches wide). ALL rows must be the same length.
 
 Hard constraints:
-- Every row string has identical length, inside [12, 24].
-- Row count inside [8, 16].
-- Outer border is '#' (or '|' doors, 'w' windows, 'R' roof beams).
-- At least one '|' door.
-- At least 25 walkable ('.' or '|' or a custom walkable tile) tiles.
-- 4–8 anchors, each pointing at a walkable tile. Always include 'center'.
-- If you use a non-core glyph, it MUST be declared in "palette". Do not spec glyphs you don't use.
+- Every row string has identical length, inside [20, 48].
+- Row count inside [8, 14].
+- The outer frame is '#' (roof on top, foundation on bottom, walls on sides), except where replaced by '|' doors, 'w' windows, or 'R' beams.
+- "floor_y" is an integer in [2, rows-2]. It names the row characters walk on.
+- The row at index floor_y must contain at least 8 walkable tiles ('.' or '|' or a custom walkable glyph).
+- At least one '|' door ON the floor_y row (so characters can walk to it).
+- At least 30 walkable tiles total in the map.
+- 4–8 anchors, each in bounds, each pointing at a walkable tile. Always include 'center'.
+- "Stand here" anchors (center, door_in, bed_side, table_side, chair_side, counter_side, bar_side, etc.) MUST sit on floor_y. "Visual" anchors that point at wall-mounted features (hearth, window, lantern, ceiling_beam, chimney, shelf) MAY sit above floor_y.
+- If you use a non-core glyph, it MUST be declared in "palette". Do not declare glyphs you don't use.
 
-Return STRICT JSON only: {"name":"...","map":[...],"anchors":{...},"palette":{GLYPH:{name,color,walkable,glow?}}}
+Return STRICT JSON only: {"name":"...","map":[...],"floor_y":N,"anchors":{...},"palette":{GLYPH:{name,color,walkable,glow?}}}
 
-Here are worked examples. Study the shape.
+Here are worked examples. Study the shape — note the side-elevation silhouettes.
 
-EXAMPLE 1 — prompt: "a small cabin at the edge of the woods"
-{"name":"A small cabin at woods' edge","map":["################","#..............#","#....~~........#","#....~~........#","#.....tt..b....#","#.....cc.......#","#..............#","#.....l........#","#..............#","#######||#######","################"],"anchors":{"center":[8,5],"hearth":[5,3],"table":[7,4],"bed":[11,4],"door_in":[7,9]}}
+EXAMPLE 1 — prompt: "a small cabin at the edge of the woods" (24 × 10, floor_y=7)
+{"name":"A small cabin at woods' edge","map":["########################","#......................#","#....R.............R...#","#......................#","#......l........w......#","#......................#","#......................#","#~..b..t..c..........|.#","########################","########################"],"floor_y":7,"anchors":{"center":[11,7],"hearth":[1,7],"bed_side":[4,7],"table_side":[8,7],"chair_side":[10,7],"window":[16,4],"lantern":[7,4],"door_in":[21,7]}}
 
-EXAMPLE 2 — prompt: "a small forge with an anvil and quench barrel"
-{"name":"A small village forge","map":["####################","#~~~...............#","#~~~....A......Q...#","#~~~...............#","#.......===........#","#........c.........#","#...................","#........t.........#","#.....l.............#","#########|##########","####################"],"anchors":{"center":[10,5],"hearth":[2,2],"anvil":[8,2],"quench":[15,2],"counter":[9,4],"stool":[9,5],"table":[9,7],"door_in":[9,9]},"palette":{"A":{"name":"anvil","color":"#3a3a3a","walkable":false},"Q":{"name":"quench barrel","color":"#2a5a3a","walkable":false}}}
+EXAMPLE 2 — prompt: "a small village forge" (32 × 11, floor_y=8)
+{"name":"A small village forge","map":["################################","#..............................#","#...R.................R........#","#..............................#","#........l.........w...........#","#..............................#","#..............................#","#..............................#","#~~..A.......====......t..c...|#","################################","################################"],"floor_y":8,"anchors":{"center":[16,8],"hearth":[1,8],"anvil_side":[6,8],"counter":[14,8],"table_side":[23,8],"chair_side":[26,8],"lantern":[9,4],"window":[19,4],"door_in":[30,8]},"palette":{"A":{"name":"anvil","color":"#3a3a3a","walkable":false}}}
 
-EXAMPLE 3 — prompt: "a tiny chapel with pews and an altar"
-{"name":"A tiny chapel","map":["################","#..............#","#......X.......#","#..............#","#....PPPPPP....#","#..............#","#....PPPPPP....#","#..............#","#..............#","#######||#######","################"],"anchors":{"center":[8,5],"altar":[7,2],"pew_front":[7,4],"pew_back":[7,6],"door_in":[7,9]},"palette":{"X":{"name":"altar","color":"#c89a3a","walkable":false,"glow":true},"P":{"name":"pew","color":"#5a3a18","walkable":false}}}
+EXAMPLE 3 — prompt: "a tiny chapel with pews and an altar" (40 × 12, floor_y=9)
+{"name":"A tiny chapel","map":["########################################","#......................................#","#...R............................R.....#","#......................................#","#......w........................w......#","#......................................#","#......................................#","#...............X......................#","#......................................#","#...PP...PP...PP...PP...PP...PP......|.#","########################################","########################################"],"floor_y":9,"anchors":{"center":[18,9],"altar_side":[16,9],"pew_a":[4,9],"pew_b":[10,9],"pew_c":[16,9],"pew_d":[22,9],"window":[7,4],"window_b":[33,4],"door_in":[37,9]},"palette":{"X":{"name":"altar","color":"#c89a3a","walkable":false,"glow":true},"P":{"name":"pew","color":"#5a3a18","walkable":false}}}
 
-Now generate a fresh map for the user's prompt. Pick dimensions, core glyphs, and custom palette to match. Return STRICT JSON only, no preamble, no markdown.`;
+Now generate a fresh side-elevation map for the user's prompt. Pick dimensions, floor_y, core glyphs, and custom palette to match. Return STRICT JSON only, no preamble, no markdown.`;
 
 const NARRATIVE_SYSTEM = `You are the NARRATIVE SPECIALIST for a quiet, understated tabletop RPG. The map specialist has already fixed the room's spatial layout and anchors. Your job: write the opening narration, name the scene's stakes, list discoverable items, and set opening world flags. Use the real anchor names given to you — items may reference them.
 
@@ -743,10 +787,11 @@ const PaletteEntrySchema = z.object({
 });
 const CORE_CHARS = "#.|~wbtc=Rl";
 
-const MapSchema = z
+export const MapSchema = z
   .object({
     name: z.string().min(1).max(80),
-    map: z.array(z.string().min(12).max(24)).min(8).max(16),
+    map: z.array(z.string().min(20).max(48)).min(8).max(14),
+    floor_y: z.number().int().min(2),
     anchors: z.record(z.tuple([z.number().int(), z.number().int()])),
     palette: z.record(PaletteEntrySchema).optional(),
   })
@@ -756,8 +801,8 @@ const MapSchema = z
       return;
     }
     const w = val.map[0].length;
-    if (w < 12 || w > 24) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `width ${w} out of range` });
+    if (w < 20 || w > 48) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `width ${w} out of range [20,48]` });
       return;
     }
     for (let i = 1; i < val.map.length; i++) {
@@ -770,8 +815,15 @@ const MapSchema = z
       }
     }
     const h = val.map.length;
+    if (val.floor_y >= h - 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `floor_y must be < rows-1 (got ${val.floor_y}, rows=${h})`,
+        path: ["floor_y"],
+      });
+      return;
+    }
     const palette = val.palette ?? {};
-    // Validate all chars are in core or custom palette.
     const allChars = val.map.flatMap((r) => Array.from(r));
     for (const c of allChars) {
       if (CORE_CHARS.includes(c)) continue;
@@ -783,22 +835,31 @@ const MapSchema = z
         return;
       }
     }
-    // Walkable: '.' and '|' always, plus any custom with walkable=true
     const walkable = new Set([".", "|"]);
     for (const [g, p] of Object.entries(palette)) {
       if (p.walkable) walkable.add(g);
     }
     const walkCount = allChars.filter((c) => walkable.has(c)).length;
-    if (walkCount < 25) {
+    if (walkCount < 30) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `needs ≥25 walkable tiles, got ${walkCount}`,
+        message: `needs ≥30 walkable tiles, got ${walkCount}`,
       });
     }
-    if (!allChars.includes("|")) {
+    // The floor row must have enough walkable tiles for characters to navigate.
+    const floorRow = val.map[val.floor_y] ?? "";
+    const floorWalk = Array.from(floorRow).filter((c) => walkable.has(c)).length;
+    if (floorWalk < 8) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "must include a door '|'",
+        message: `floor_y row needs ≥8 walkable chars, got ${floorWalk}`,
+        path: ["floor_y"],
+      });
+    }
+    if (!floorRow.includes("|")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "door '|' must sit on floor_y row",
       });
     }
     // Anchors must be in bounds
@@ -877,6 +938,7 @@ export type PaletteEntry = z.infer<typeof PaletteEntrySchema>;
 export type MapValue = {
   name: string;
   map: string[];
+  floor_y: number;
   anchors: Record<string, [number, number]>;
   palette?: Record<string, PaletteEntry>;
 };
@@ -885,7 +947,7 @@ async function generateMap(env: Env, prompt: string): Promise<{
   ok: true;
   value: MapValue;
 } | { ok: false; reason: string }> {
-  const userPrompt = `Scene prompt: ${prompt}\n\nReturn STRICT JSON with fields name, map, anchors, palette (if you used custom tiles).`;
+  const userPrompt = `Scene prompt: ${prompt}\n\nReturn STRICT JSON with fields name, map, floor_y (integer row index for the floor), anchors, palette (if you used custom tiles).`;
   const attempt = async (): Promise<{ ok: true; value: MapOut } | { ok: false; reason: string; issues?: z.ZodIssue[]; raw?: unknown }> => {
     const ai = await runSpecialist(env, MAP_SYSTEM, userPrompt, 1100);
     const parsed = parseAiResponse(ai);
@@ -906,14 +968,14 @@ async function generateMap(env: Env, prompt: string): Promise<{
   const buildValue = (v: MapOut): MapValue => {
     const palette = v.palette ?? {};
     const walkable = walkableSet(palette);
-    const anchors = filterAnchors(v.map, v.anchors, walkable);
-    return { name: v.name, map: v.map, anchors, palette: v.palette };
+    const anchors = filterAnchors(v.map, v.anchors, walkable, v.floor_y);
+    return { name: v.name, map: v.map, floor_y: v.floor_y, anchors, palette: v.palette };
   };
   if (first.ok) return { ok: true, value: buildValue(first.value) };
   // Repair attempt.
   try {
     const bulletList = (first.issues ?? []).map((i) => `- ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n");
-    const repairUser = `Original output:\n${JSON.stringify(first.raw)}\n\nValidation errors:\n${bulletList}\n\nReturn only the corrected JSON (name, map, anchors, palette).`;
+    const repairUser = `Original output:\n${JSON.stringify(first.raw)}\n\nValidation errors:\n${bulletList}\n\nReturn only the corrected JSON (name, map, floor_y, anchors, palette).`;
     const ai = await runSpecialist(env, `${MAP_SYSTEM}\n\nYou produced an output that failed validation. Return corrected STRICT JSON only.`, repairUser, 1100);
     const parsed = parseAiResponse(ai);
     if (parsed && typeof parsed === "object") {
@@ -939,10 +1001,13 @@ function walkableSet(palette: Record<string, PaletteEntry>): Set<string> {
   return s;
 }
 
+const VISUAL_ANCHOR_RE = /^(hearth|window|lantern|altar|shelf|ceiling|beam|chimney|roof)/;
+
 function filterAnchors(
   map: string[],
   anchorsIn: Record<string, [number, number]>,
   walkable: Set<string>,
+  floorY: number,
 ): Record<string, [number, number]> {
   const anchors: Record<string, [number, number]> = {};
   const h = map.length;
@@ -950,34 +1015,38 @@ function filterAnchors(
   for (const [k, v] of Object.entries(anchorsIn)) {
     const [x, y] = v;
     if (x < 0 || x >= w || y < 0 || y >= h) continue;
-    const ch = map[y]?.[x];
-    if (ch && walkable.has(ch)) anchors[k] = [x, y];
+    // Visual anchors (wall-mounted features) may sit above floor_y and
+    // don't need to be walkable. Stand-here anchors must live on the
+    // floor row so agents can actually reach them.
+    if (VISUAL_ANCHOR_RE.test(k)) {
+      anchors[k] = [x, y];
+      continue;
+    }
+    const ch = map[floorY]?.[x];
+    if (ch && walkable.has(ch)) anchors[k] = [x, floorY];
   }
   if (!anchors.center) {
+    const floorRow = map[floorY] ?? "";
+    const mid = Math.floor(w / 2);
     let best: [number, number] | null = null;
     let bestD = Infinity;
-    const cx = Math.floor(w / 2);
-    const cy = Math.floor(h / 2);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        if (!walkable.has(map[y][x])) continue;
-        const d = Math.abs(x - cx) + Math.abs(y - cy);
-        if (d < bestD) { bestD = d; best = [x, y]; }
-      }
+    for (let x = 0; x < w; x++) {
+      if (!walkable.has(floorRow[x])) continue;
+      const d = Math.abs(x - mid);
+      if (d < bestD) { bestD = d; best = [x, floorY]; }
     }
     if (best) anchors.center = best;
   }
   if (Object.keys(anchors).length < 4) {
+    const floorRow = map[floorY] ?? "";
     let added = 0;
     let i = 0;
-    for (let y = 1; y < h - 1 && added < 4; y++) {
-      for (let x = 1; x < w - 1 && added < 4; x++) {
-        if (!walkable.has(map[y][x])) continue;
-        const name = `spot_${i++}`;
-        if (anchors[name]) continue;
-        anchors[name] = [x, y];
-        added++;
-      }
+    for (let x = 1; x < w - 1 && added < 4; x++) {
+      if (!walkable.has(floorRow[x])) continue;
+      const name = `spot_${i++}`;
+      if (anchors[name]) continue;
+      anchors[name] = [x, floorY];
+      added++;
     }
   }
   return anchors;
@@ -1169,6 +1238,7 @@ async function handleRoomJSON(env: Env, prompt: string, bc?: BuildingContextInpu
   const merged: RoomResponse = {
     name: mapRes.value.name,
     map: mapRes.value.map,
+    floor_y: mapRes.value.floor_y,
     anchors: mapRes.value.anchors,
     palette: mapRes.value.palette,
     lines: narrativeRes.value.lines.slice(0, 4),
@@ -1177,6 +1247,7 @@ async function handleRoomJSON(env: Env, prompt: string, bc?: BuildingContextInpu
     openingFlags: narrativeRes.value.openingFlags,
     moods: profileRes.ok ? profileRes.value.moods : undefined,
     profiles: profileRes.ok ? profileRes.value.profiles : undefined,
+    projection: "side",
   };
   return new Response(JSON.stringify(merged), {
     headers: { "Content-Type": "application/json", ...CORS_HEADERS },
@@ -1210,8 +1281,10 @@ function handleRoomSSE(env: Env, prompt: string, bc?: BuildingContextInput): Res
         room: {
           name: mapRes.value.name,
           map: mapRes.value.map,
+          floor_y: mapRes.value.floor_y,
           anchors: mapRes.value.anchors,
           palette: mapRes.value.palette,
+          projection: "side",
         },
       });
 
@@ -1276,6 +1349,7 @@ function handleRoomSSE(env: Env, prompt: string, bc?: BuildingContextInput): Res
       const merged: RoomResponse = {
         name: mapRes.value.name,
         map: mapRes.value.map,
+        floor_y: mapRes.value.floor_y,
         anchors: mapRes.value.anchors,
         palette: mapRes.value.palette,
         lines: (narrativeVal?.lines ?? []).slice(0, 4),
@@ -1284,6 +1358,7 @@ function handleRoomSSE(env: Env, prompt: string, bc?: BuildingContextInput): Res
         openingFlags: narrativeVal?.openingFlags,
         moods: profileVal?.moods,
         profiles: profileVal?.profiles,
+        projection: "side",
       };
       await send({ phase: "done", room: merged });
       await writer.close();
