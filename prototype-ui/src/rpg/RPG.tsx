@@ -29,9 +29,7 @@ import {
   resetCodaFlag,
   listRooms,
   loadRoomById,
-  deleteRoom,
   newRoomId,
-  buildShareUrl,
   consumeSharedRoomFromUrl,
   hasSharedRoomInUrl,
   CHARACTER_PALETTES,
@@ -134,7 +132,20 @@ export function RPG() {
         flashToast("shared link couldn't be read");
         return;
       }
+      // Every floor lives inside the building — attach the imported one so it
+      // becomes the active floor rather than a standalone.
+      let bld = buildingRef.current ?? await loadBuilding();
+      if (!bld) {
+        bld = createBuilding();
+      }
+      room.snapshot.buildingId = bld.id;
+      room.snapshot.floorIndex = bld.floors.length;
+      bld.activeRoomId = room.snapshot.roomId;
+      bld.lastPlayedAt = Date.now();
+      setBuilding(bld);
+      void saveBuilding(bld);
       stateRef.current = room.snapshot;
+      saveState(room.snapshot);
       setState({ ...room.snapshot });
     })();
     return () => { cancelled = true; };
@@ -363,37 +374,38 @@ export function RPG() {
     setRoomProgress({ pct: 10, stage: "building the floor…" });
 
     try {
-      // If in building mode, pass survivors/ghosts to the generator.
-      let bc: BuildingContext | undefined;
-      const bld = buildingRef.current;
+      // Every floor lives inside the building — materialize one if the player
+      // somehow reached room generation without a building yet.
+      let bld = buildingRef.current;
+      if (!bld) {
+        bld = createBuilding();
+        setBuilding(bld);
+        void saveBuilding(bld);
+      }
       // Resolve which survivors will actually carry forward. Honor the
       // player's picks from the "WHO COMES UP" widget; fall back to the
       // first up to 3 if nothing is picked.
-      const pickedSurvivors: SurvivorRecord[] = bld
-        ? (selectedSurvivors.length > 0
-            ? bld.roster.filter((s) => selectedSurvivors.includes(s.id))
-            : bld.roster.slice(0, 3))
-        : [];
-      if (bld) {
-        bc = {
-          survivors: pickedSurvivors.slice(0, 3).map((s) => ({
-            name: s.name,
-            description: s.description,
-            backstory: s.backstory,
-            inventory: [...s.inventory],
-          })),
-          ghosts: bld.ghosts.slice(-3).map((g) => ({
-            name: g.name,
-            description: g.description,
-            causeOfDeath: g.causeOfDeath,
-            diedInRoomName: g.diedInRoomName,
-          })),
-          previousRoomSummary: bld.floors.length > 0
-            ? bld.floors[bld.floors.length - 1].storySummary
-            : "",
-          floorNumber: bld.floors.length,
-        };
-      }
+      const pickedSurvivors: SurvivorRecord[] = selectedSurvivors.length > 0
+        ? bld.roster.filter((s) => selectedSurvivors.includes(s.id))
+        : bld.roster.slice(0, 3);
+      const bc: BuildingContext = {
+        survivors: pickedSurvivors.slice(0, 3).map((s) => ({
+          name: s.name,
+          description: s.description,
+          backstory: s.backstory,
+          inventory: [...s.inventory],
+        })),
+        ghosts: bld.ghosts.slice(-3).map((g) => ({
+          name: g.name,
+          description: g.description,
+          causeOfDeath: g.causeOfDeath,
+          diedInRoomName: g.diedInRoomName,
+        })),
+        previousRoomSummary: bld.floors.length > 0
+          ? bld.floors[bld.floors.length - 1].storySummary
+          : "",
+        floorNumber: bld.floors.length,
+      };
       const room = await streamRoom(prompt, (phase) => {
         const entry = PHASE_PROGRESS[phase];
         if (!entry) return;
@@ -406,31 +418,28 @@ export function RPG() {
       applyScene(stateRef.current, scene); resetCodaFlag();
       const live = stateRef.current;
       live.roomId = newRoomId();
-      // Building integration: set building fields if active.
-      if (bld) {
-        live.buildingId = bld.id;
-        live.floorIndex = bld.floors.length;
-        live.inheritedMemory = buildInheritedMemory(bld);
-        bld.activeRoomId = live.roomId;
-        bld.lastPlayedAt = Date.now();
-        // Record the ingredient categories we just picked so progress
-        // objectives ("use 3 categories") can count them.
-        ensureProgressState(bld);
-        const cats = Array.from(new Set(
-          selectedIngredients
-            .map((id) => INGREDIENTS.find((c) => c.id === id)?.category)
-            .filter((c): c is NonNullable<typeof c> => !!c),
-        ));
-        recordIngredientsPicked(bld, cats);
-        rollObjectivesIfNeeded(bld);
-        const done = evaluateObjectives(bld);
-        for (const o of done) flashToast(`+${o.reward} · ${o.label}`);
-        void saveBuilding(bld);
-        if (pickedSurvivors.length > 0) {
-          live.characters = survivorsToCharacters(pickedSurvivors, scene);
-        } else if (bld.roster.length >= 2) {
-          live.characters = survivorsToCharacters(bld.roster.slice(0, 3), scene);
-        }
+      live.buildingId = bld.id;
+      live.floorIndex = bld.floors.length;
+      live.inheritedMemory = buildInheritedMemory(bld);
+      bld.activeRoomId = live.roomId;
+      bld.lastPlayedAt = Date.now();
+      // Record the ingredient categories we just picked so progress
+      // objectives ("use 3 categories") can count them.
+      ensureProgressState(bld);
+      const cats = Array.from(new Set(
+        selectedIngredients
+          .map((id) => INGREDIENTS.find((c) => c.id === id)?.category)
+          .filter((c): c is NonNullable<typeof c> => !!c),
+      ));
+      recordIngredientsPicked(bld, cats);
+      rollObjectivesIfNeeded(bld);
+      const done = evaluateObjectives(bld);
+      for (const o of done) flashToast(`+${o.reward} · ${o.label}`);
+      void saveBuilding(bld);
+      if (pickedSurvivors.length > 0) {
+        live.characters = survivorsToCharacters(pickedSurvivors, scene);
+      } else if (bld.roster.length >= 2) {
+        live.characters = survivorsToCharacters(bld.roster.slice(0, 3), scene);
       }
       live.simStartedAt = now;
       live.lastAmbient = now;
@@ -624,21 +633,6 @@ export function RPG() {
       stateRef.current = loaded;
       resetCodaFlag();
       setState({ ...loaded });
-    };
-
-    const onShareRoom = async (room: SavedRoom) => {
-      try {
-        const url = await buildShareUrl(room.snapshot);
-        try {
-          await navigator.clipboard.writeText(url);
-          flashToast("share link copied");
-        } catch {
-          try { history.replaceState(null, "", url.replace(location.origin + location.pathname, "")); } catch { /* ignore */ }
-          flashToast("share link in address bar");
-        }
-      } catch {
-        flashToast("couldn't build share link");
-      }
     };
 
     const showForm = showNewRoomForm || rooms.length === 0;
@@ -851,7 +845,6 @@ export function RPG() {
     }
 
     // Building home / tower view
-    const standalones = rooms.filter((r) => !r.buildingId && !(building?.activeRoomId === r.id));
     const activeRoom = building?.activeRoomId
       ? rooms.find((r) => r.id === building.activeRoomId) ?? null
       : null;
@@ -966,29 +959,6 @@ export function RPG() {
             ))}
 
             <div className="rp-foundation">FOUNDED {relativeTime(building.createdAt).toUpperCase()}</div>
-          </div>
-        )}
-
-        {standalones.length > 0 && (
-          <div style={{ maxWidth: 640, margin: "32px auto 0", paddingTop: 20, borderTop: "1px solid var(--line)" }}>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--ink-faint)", letterSpacing: "0.22em", textTransform: "uppercase", marginBottom: 12 }}>STANDALONE FLOORS</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {standalones.map((r) => (
-                <RoomCard
-                  key={r.id}
-                  room={r}
-                  onOpen={() => onEnterRoom(r.id)}
-                  onDelete={() => {
-                    const label = r.snapshot.scene.name || r.name || "this floor";
-                    if (window.confirm(`Delete "${label}"? This is permanent.`)) {
-                      deleteRoom(r.id);
-                      setLibraryTick((t) => t + 1);
-                    }
-                  }}
-                  onShare={() => void onShareRoom(r)}
-                />
-              ))}
-            </div>
           </div>
         )}
 
@@ -1722,63 +1692,6 @@ function ObjectivesPanel({ building }: { building: BuildingState }) {
         );
       })}
     </section>
-  );
-}
-
-function RoomCard({
-  room,
-  onOpen,
-  onDelete,
-  onShare,
-}: {
-  room: SavedRoom;
-  onOpen: () => void;
-  onDelete: () => void;
-  onShare: () => void;
-}) {
-  const s = room.snapshot;
-  const tensionPct = Math.min(100, Math.round(s.tension));
-  const spent = tensionPct >= 100;
-  return (
-    <div
-      className={`rp-floor ${spent ? "is-sealed" : ""}`}
-      role="listitem"
-      aria-label={spent ? `${room.name} — sealed` : room.name}
-    >
-      <div className="rp-floor-num" style={{ width: 40, minWidth: 40 }}>·</div>
-      <div className="rp-floor-body">
-        <MiniRoomCanvas room={room} />
-        <div className="rp-floor-info">
-          <div className="rp-floor-name">{s.scene.name || room.name}</div>
-          <div className="rp-floor-status" style={{ color: spent ? "var(--ink-dim)" : "var(--amber)" }}>
-            {spent ? "SEALED" : `TENSION ${tensionPct}`} · {relativeTime(room.lastPlayedAt).toUpperCase()}
-          </div>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {!spent && (
-            <button type="button" className="rp-floor-enter" onClick={onOpen}>ENTER ›</button>
-          )}
-          <div style={{ display: "flex", gap: 4 }}>
-            <button
-              type="button"
-              className="rp-icon-btn"
-              style={{ width: 28, height: 28 }}
-              onClick={onShare}
-              aria-label="Share"
-              title="Copy share link"
-            >⤴</button>
-            <button
-              type="button"
-              className="rp-icon-btn"
-              style={{ width: 28, height: 28 }}
-              onClick={onDelete}
-              aria-label="Delete"
-              title="Delete"
-            >×</button>
-          </div>
-        </div>
-      </div>
-    </div>
   );
 }
 
