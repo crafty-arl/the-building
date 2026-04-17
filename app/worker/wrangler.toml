@@ -8,6 +8,15 @@ compatibility_flags = ["nodejs_compat"]
 [ai]
 binding = "AI"
 
+# Daily wake-up: at 00:00 UTC each day, the scheduled() handler in index.ts
+# fans out a /wake fetch to every known user's Hearth DO. This is the
+# *prerequisite* for autonomous scenes — a DO that has never been instantiated
+# can't fire an alarm, so something has to construct it. After this single
+# nudge each DO arms its own alarm and ticks autonomously for the rest of
+# the day even if the player never opens the app.
+[triggers]
+crons = ["0 0 * * *"]
+
 [[durable_objects.bindings]]
 name = "HEARTH"
 class_name = "Hearth"

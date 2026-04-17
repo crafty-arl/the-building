@@ -3,8 +3,13 @@
  * daily-plan overlays (timeOfDay + residents derived from DailyPlan + clock).
  */
 
-import type { DailyPlan, RunClock } from "../../shared/protocol.ts";
+import type {
+  DailyPlan,
+  RunClock,
+  ScenePaletteEntry,
+} from "../../shared/protocol.ts";
 import { slotForHour, timeOfDayForHour } from "./daily-plan.ts";
+import type { RoomPlan } from "./room-plan.ts";
 
 export interface Scene {
   id: string;
@@ -14,7 +19,23 @@ export interface Scene {
   npcs: string[];
   hooks: string[];
   authoredPrompt: string;
+  anchors: string[];
+  /** Hearth-authored geometry. Populated when the DO has a RoomPlan. */
+  tilemap?: string[];
+  floorY?: number;
+  anchorCoords?: Record<string, [number, number]>;
+  palette?: Record<string, ScenePaletteEntry>;
+  source?: "ai" | "fallback";
 }
+
+export const DEFAULT_TAVERN_ANCHORS = [
+  "door",
+  "fire",
+  "bar",
+  "table",
+  "window",
+  "stairs",
+];
 
 export const TAVERN: Scene = {
   id: "001-the-tavern",
@@ -30,20 +51,53 @@ export const TAVERN: Scene = {
   ],
   authoredPrompt:
     "The scene opens with the Stranger watching the door. He already knows you are here. The bar is quiet. The Claw notices the lantern swings without wind.",
+  anchors: DEFAULT_TAVERN_ANCHORS,
 };
 
 /**
  * Project a DailyPlan + RunClock onto TAVERN: override timeOfDay from the
  * in-game hour and add plan residents to the NPC roster alongside the Stranger.
+ * If the room authored its own anchors, those replace the inn defaults.
+ *
+ * When `plan` is a `RoomPlan` (Phase 6E.2+), the room geometry (tilemap,
+ * anchor coords, palette) flows through onto the Scene so the client can
+ * render whatever Hearth authored.
  */
-export function buildScene(plan: DailyPlan, clock: RunClock): Scene {
+export function buildScene(
+  plan: DailyPlan,
+  clock: RunClock,
+  opts?: { anchors?: string[]; location?: string },
+): Scene {
   const extraNpcs = plan.npcs.map((n) => n.name);
-  return {
+  const room = isRoomPlan(plan) ? plan : null;
+  // Anchor list comes from room.anchors keys when present, else the explicit
+  // override in opts, else the legacy tavern defaults.
+  const anchors = room
+    ? Object.keys(room.anchors)
+    : opts?.anchors && opts.anchors.length > 0
+      ? opts.anchors
+      : TAVERN.anchors;
+  const base: Scene = {
     ...TAVERN,
     id: `day-${plan.date}-${clock.gameHour.toString().padStart(2, "0")}`,
     timeOfDay: timeOfDayForHour(clock.gameHour),
     npcs: [...TAVERN.npcs, ...extraNpcs],
+    anchors,
+    ...(opts?.location ? { location: opts.location } : {}),
   };
+  if (room) {
+    base.tilemap = room.tilemap;
+    base.floorY = room.floorY;
+    base.anchorCoords = room.anchors;
+    if (room.palette) base.palette = room.palette;
+    base.source = room.source;
+  }
+  return base;
+}
+
+/** Type guard: is this DailyPlan actually a RoomPlan with geometry? */
+function isRoomPlan(p: DailyPlan): p is RoomPlan {
+  return Array.isArray((p as RoomPlan).tilemap);
 }
 
 export const STRANGER = {

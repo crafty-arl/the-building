@@ -2187,11 +2187,15 @@ export default {
       }
 
       const userId = url.searchParams.get("userId");
+      const roomId = url.searchParams.get("roomId");
       if (!userId) {
         return new Response("missing ?userId", { status: 400 });
       }
+      if (!roomId) {
+        return new Response("missing ?roomId", { status: 400 });
+      }
 
-      const id = env.HEARTH.idFromName(userId);
+      const id = env.HEARTH.idFromName(`${userId}:${roomId}`);
       const stub = env.HEARTH.get(id);
 
       return stub.fetch(request);
@@ -2199,5 +2203,43 @@ export default {
 
     // This worker is API-only — the client is served by Cloudflare Pages.
     return new Response("Not found", { status: 404, headers: CORS_HEADERS });
+  },
+
+  /**
+   * Daily wake-up cron (see wrangler.toml [triggers]). Pokes every known
+   * user's Hearth DO with a /wake fetch so it generates today's plan and
+   * arms its own alarm. After this single nudge each DO ticks autonomously
+   * for the rest of the day even if the player never opens the app.
+   *
+   * A DO that has never been instantiated cannot fire an alarm — *something*
+   * has to construct it. That something is this handler.
+   */
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Per-room fanout: one wake per (user, room) pair. Sourced from
+    // game_state where rooms live (entity_type = 'room'). Each pair owns
+    // its own Hearth DO via idFromName(`${userId}:${roomId}`).
+    const rows = await env.DB
+      .prepare(
+        "SELECT user_id, entity_id FROM game_state WHERE entity_type = 'room'",
+      )
+      .all<{ user_id: string; entity_id: string }>();
+    for (const row of rows.results ?? []) {
+      const userId = row.user_id;
+      const roomId = row.entity_id;
+      const stub = env.HEARTH.get(
+        env.HEARTH.idFromName(`${userId}:${roomId}`),
+      );
+      const wakeUrl =
+        `https://internal/wake?userId=${encodeURIComponent(userId)}` +
+        `&roomId=${encodeURIComponent(roomId)}`;
+      ctx.waitUntil(
+        stub.fetch(wakeUrl).catch((err) => {
+          console.error(
+            `[scheduled] wake failed for ${userId}:${roomId}:`,
+            err,
+          );
+        }),
+      );
+    }
   },
 };

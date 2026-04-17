@@ -45,3 +45,9 @@ Thumbs.db
 
 # local claude session state
 .claude/
+
+# playwright MCP test session artifacts (yml snapshots, console logs)
+.playwright-mcp/
+
+# ad-hoc screenshots captured during development
+/*.png

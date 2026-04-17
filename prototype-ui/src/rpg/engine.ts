@@ -1717,37 +1717,10 @@ function withWatchdog(
   })();
 }
 
-export function maybeAmbient(s: GameState, now: number) {
-  const GAP = 22_000;
-  if (s.tension >= 100) return; // story has spent itself; let the silence hold
-  if (now - s.lastAmbient < GAP) return;
-  if (s.pending && s.pending.sealedAt !== null) return;
-  if (s.activePlan || s.planQueue.length > 0) return;
-  if (ambientInFlight) return;
-  s.lastAmbient = now;
-  ambientInFlight = true;
-  withWatchdog(
-    "maybeAmbient",
-    () => { ambientInFlight = false; },
-    45_000,
-    () => { enqueue(s, [pick(AMBIENT_FALLBACK)], now, "ambient"); },
-    async () => {
-      const lines = await fetchNarration(
-        s,
-        { id: "ambient", title: "atmosphere", flavor: "" },
-        1,
-      );
-      for (const line of lines) {
-        s.narrationQueue.push({ line, kind: "ambient" });
-      }
-      if (!s.pending) {
-        const next = s.narrationQueue.shift();
-        if (next) {
-          s.pending = { full: next.line, shown: 0, sealedAt: now, kind: next.kind };
-        }
-      }
-    },
-  );
+export function maybeAmbient(_s: GameState, _now: number) {
+  // No-op since Phase 6C — ambient narration is now driven by autonomous
+  // pi-agents in the Hearth DO (broadcast over WebSocket as agent-decided
+  // events). The local engine no longer fetches /api/rpg/narrate.
 }
 
 // ─── Card plans (7 beats each) ─────────────────────────────────────────────
@@ -3103,58 +3076,6 @@ export async function streamRoom(
   return merged as GeneratedRoom;
 }
 
-// Adapt a worker-shaped GeneratedRoom into a Scene (with starts + schedules).
-export function sceneFromRoom(room: GeneratedRoom): Scene {
-  const rows = room.map.length;
-  // If the worker didn't emit floor_y (old payloads), pick a sane default so
-  // the UI doesn't crash — characters stand in the lower third of the room.
-  const floor_y =
-    typeof room.floor_y === "number"
-      ? room.floor_y
-      : Math.max(1, Math.min(rows - 2, Math.floor(rows * 0.8)));
-  const anchors: Record<string, Tile> = {};
-  // Snap "stand here" anchors (bed_side, table_side, door_in, center, etc.)
-  // to the floor row so 1D walks always land on walkable columns. Visual
-  // anchors that name a wall-mounted object (hearth_face, window_sill,
-  // lantern, altar) keep their authored y so tile art can attach to walls.
-  const isVisualAnchor = (name: string) =>
-    /^(hearth|window|lantern|altar|shelf|ceiling|beam|chimney)/.test(name);
-  for (const [name, [x, y]] of Object.entries(room.anchors)) {
-    anchors[name] = { x, y: isVisualAnchor(name) ? y : floor_y };
-  }
-  if (!anchors["center"]) {
-    // Fallback: pick middle of the floor row.
-    const row = room.map[floor_y] ?? "";
-    let best = Math.floor(row.length / 2);
-    for (let d = 0; d < row.length; d++) {
-      if (row[best + d] === ".") { best += d; break; }
-      if (row[best - d] === ".") { best -= d; break; }
-    }
-    anchors["center"] = { x: best, y: floor_y };
-  }
-  const names = Object.keys(anchors);
-  const half = Math.ceil(names.length / 2);
-  return {
-    id: `gen_${Date.now()}`,
-    name: room.name || "a room",
-    map: room.map,
-    floor_y,
-    anchors,
-    palette: room.palette,
-    starts: {
-      marrow: names[0] ?? "center",
-      soren: names[half] ?? names[1] ?? "center",
-      slot_0: names[0] ?? "center",
-      slot_1: names[half] ?? names[1] ?? "center",
-    },
-    schedules: {
-      marrow: makeScheduleFrom(names),
-      soren: makeScheduleFrom([...names].reverse()),
-      slot_0: makeScheduleFrom(names),
-      slot_1: makeScheduleFrom([...names].reverse()),
-    },
-  };
-}
 
 // Nearest anchor by horizontal distance (side view — vertical drift is nil
 // because characters are pinned to floor_y).
@@ -3222,46 +3143,11 @@ let summarizeInFlight = false;
 // Rewrites a short "story-so-far" paragraph every ~5 beats so the director
 // has compressed memory of earlier events even when the recent-log window
 // has rolled past them. Safe to call every tick; gated on beat count.
-export function maybeSummarize(s: GameState, now: number): void {
-  if (s.phase !== "playing") return;
-  if (summarizeInFlight) return;
-  if (s.log.length < 6) return;
-  const sinceLast = s.beatsPlayed - s.summaryBeatsAt;
-  // First summary after 4 beats, then every 5.
-  const threshold = s.summaryBeatsAt === 0 ? 4 : 5;
-  if (sinceLast < threshold) return;
-  summarizeInFlight = true;
-  withWatchdog(
-    "maybeSummarize",
-    () => { summarizeInFlight = false; },
-    45_000,
-    null,
-    async () => {
-      const body = {
-        sceneName: s.scene.name,
-        stakes: s.stakes,
-        previousSummary: s.storySummary,
-        log: s.log.slice(-40).map((l) => l.text),
-        characters: s.characters.map((c) => ({
-          id: c.id,
-          name: c.name,
-          objective: c.objective,
-        })),
-      };
-      const resp = await fetch(SUMMARIZE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok) return;
-      const data = (await resp.json()) as { summary?: string };
-      if (typeof data.summary === "string" && data.summary.trim()) {
-        s.storySummary = data.summary.trim().slice(0, 800);
-        s.summaryBeatsAt = s.beatsPlayed;
-      }
-      void now;
-    },
-  );
+export function maybeSummarize(_s: GameState, _now: number): void {
+  // No-op since Phase 6C — story compression now lives in the Hearth DO
+  // (the SessionTree's facts/vows). The local engine no longer hits
+  // /api/rpg/summarize. summarizeInFlight is retained only for type stability.
+  void summarizeInFlight;
 }
 const RESKIN_URL = `${API_BASE}/api/rpg/reskin`;
 
@@ -3302,57 +3188,18 @@ let lastAutoTickAt = 0;
 // plays, the spent overlay offers the reset.
 let codaFired = false;
 export function resetCodaFlag(): void { codaFired = false; }
-export function maybeCodaBeat(s: GameState): void {
-  if (s.phase !== "playing") return;
-  if (s.tension < 100) return;
-  if (codaFired) return;
-  if (autoTickInFlight) return;
-  if (s.activePlan || s.planQueue.length > 0) return;
-  codaFired = true;
-  autoTickInFlight = true;
-  withWatchdog(
-    "maybeCodaBeat",
-    () => { autoTickInFlight = false; },
-    45_000,
-    null,
-    async () => {
-      const directive =
-        "This is the final beat of the scene. The story has spent itself. Compose a CLOSING moment — a last word, a last action, a last image. One clear resolution or unresolution; then the room is quiet. 4-6 steps, ending with a strong closing narrate line.";
-      const plan = await fetchDirective(s, directive);
-      if (plan) s.planQueue.push(plan);
-    },
-  );
+export function maybeCodaBeat(_s: GameState): void {
+  // No-op since Phase 6C — coda beats are now authored by the Hearth
+  // director-agent (Phase 3 of the autonomous-scene plan). Local engine
+  // no longer fires its own director.
+  void codaFired;
+  void autoTickInFlight;
+  void lastAutoTickAt;
 }
 
-export function maybeDirectorTick(s: GameState, now: number): void {
-  // Faster ticks as tension rises — but scenes should breathe at low
-  // tension, so the opening beats are leisurely. Story accelerates
-  // toward the end without sprinting there.
-  const IDLE_MS =
-    s.tension >= 80 ? 10_000
-    : s.tension >= 55 ? 18_000
-    : s.tension >= 25 ? 28_000
-    : 40_000;
-  if (s.phase !== "playing") return;
-  if (s.tension >= 100) return; // story is spent; wait for player to reset
-  if (autoTickInFlight) return;
-  if (s.activePlan || s.planQueue.length > 0) return;
-  if (s.pending && s.pending.sealedAt !== null) return;
-  if (now - lastAutoTickAt < IDLE_MS) return;
-  // Wait a beat after the pending narration is fully settled.
-  if (s.pending && s.pending.shown < s.pending.full.length) return;
-  lastAutoTickAt = now;
-  autoTickInFlight = true;
-  withWatchdog(
-    "maybeDirectorTick",
-    () => { autoTickInFlight = false; },
-    45_000,
-    null,
-    async () => {
-      const plan = await fetchDirective(s, directiveForTension(s.tension));
-      if (plan) s.planQueue.push(plan);
-    },
-  );
+export function maybeDirectorTick(_s: GameState, _now: number): void {
+  // No-op since Phase 6C — the Hearth director-agent owns scene pacing.
+  // The local engine no longer fetches /api/rpg/play.
 }
 
 // Voice + action cue per tension band. Tone guidance so the director's
