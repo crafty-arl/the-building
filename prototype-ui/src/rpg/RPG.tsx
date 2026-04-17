@@ -2832,7 +2832,8 @@ type PendingLine = {
 };
 
 function stripSpeechPrefix(s: string): string {
-  return s.replace(/^[A-Za-z]+:\s*/, "").replace(/^["']|["']$/g, "");
+  // Names may be 1–2 words (e.g. "Mrs. Kanto").
+  return s.replace(/^[A-Za-z.]+(?:\s+[A-Za-z.]+)?:\s*/, "").replace(/^["']|["']$/g, "");
 }
 
 // Pixel-art speech bubble tethered to a speaker on screen. Drawn in screen
@@ -3009,41 +3010,40 @@ function drawDialog(
   const stillTyping = Math.floor(pending.shown) < pending.full.length;
   const shown = pending.full.slice(0, Math.floor(pending.shown));
 
-  let speakerId = "";
+  // Slot keys "marrow"/"soren" are internal — resolve them to cast position
+  // 0/1 so the speaker label shows the invented name and the bubble tethers
+  // to whichever character is actually in that slot.
+  let speaker: Character | undefined;
   let speakerLabel = "";
   let speakerColor = "#e8c86a";
-  if (pending.kind === "speech_marrow") {
-    speakerId = "marrow";
-    speakerLabel = "MARROW";
-    speakerColor = "#e8c86a";
-  } else if (pending.kind === "speech_soren") {
-    speakerId = "soren";
-    speakerLabel = "SOREN";
-    speakerColor = "#8ab0c8";
+  if (pending.kind === "speech_marrow" || pending.kind === "speech_soren") {
+    const cast = characters.filter((c) => !c.transient);
+    const slotIdx = pending.kind === "speech_marrow" ? 0 : 1;
+    speaker = cast[slotIdx];
+    if (speaker) speakerLabel = speaker.name.toUpperCase();
+    if (pending.kind === "speech_soren") speakerColor = "#8ab0c8";
   }
 
-  if (speakerId) {
-    const speaker = characters.find((c) => c.id === speakerId && !c.dead);
-    if (speaker) {
-      const worldAnchorX = (speaker.pos.x + 0.5) * TILE_PX;
-      const worldAnchorY = speaker.pos.y * TILE_PX - 4;
-      const screenX = (worldAnchorX - camWorldX) * zoom;
-      const screenY = (worldAnchorY - camWorldY) * zoom;
-      const onScreen = screenX > -40 && screenX < W + 40 && screenY > -40 && screenY < H + 40;
-      if (onScreen) {
-        drawSpeechBubble(
-          ctx,
-          screenX,
-          screenY,
-          stripSpeechPrefix(shown),
-          speakerColor,
-          stillTyping,
-          now,
-          W,
-          H,
-        );
-        return;
-      }
+  if (speaker && !speaker.dead) {
+    const worldAnchorX = (speaker.pos.x + 0.5) * TILE_PX;
+    const worldAnchorY = speaker.pos.y * TILE_PX - 4;
+    const screenX = (worldAnchorX - camWorldX) * zoom;
+    const screenY = (worldAnchorY - camWorldY) * zoom;
+    const onScreen =
+      screenX > -40 && screenX < W + 40 && screenY > -40 && screenY < H + 40;
+    if (onScreen) {
+      drawSpeechBubble(
+        ctx,
+        screenX,
+        screenY,
+        stripSpeechPrefix(shown),
+        speakerColor,
+        stillTyping,
+        now,
+        W,
+        H,
+      );
+      return;
     }
   }
 
