@@ -39,9 +39,9 @@ database_id = "d936ab33-392e-47b4-b82e-bb7656cdb82e"
 # no-op proxy module (src/stubs/empty.ts).
 [alias]
 "@anthropic-ai/sdk" = "./src/stubs/empty.ts"
-"openai" = "./src/stubs/empty.ts"
-"openai/resources/chat/completions" = "./src/stubs/empty.ts"
-"openai/resources/chat/completions.js" = "./src/stubs/empty.ts"
+# NOTE: `openai` is NOT stubbed — pi-ai's openai-completions driver (the
+# only provider we actually call against Cloudflare) does `new OpenAI(...)`
+# at runtime and would hang forever if the client were a Proxy no-op.
 "@google/genai" = "./src/stubs/empty.ts"
 "@google-cloud/vertexai" = "./src/stubs/empty.ts"
 "@mistralai/mistralai" = "./src/stubs/empty.ts"
