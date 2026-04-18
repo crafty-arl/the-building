@@ -17,6 +17,8 @@ import type {
   Difficulty,
   NpcDay,
   RunClock,
+  StoryBible,
+  StoryState,
 } from "../../shared/protocol.ts";
 import type { HearthEnv } from "./hearth.ts";
 
@@ -24,6 +26,7 @@ export const STORAGE_AGENTS = "scene-agents";
 export const STORAGE_EVENT_BUS = "scene-event-bus";
 const EVENT_BUS_LIMIT = 30;
 export const SPAWN_ACTION_TYPE = "spawn";
+export const ADVANCE_ACT_ACTION_TYPE = "advance-act";
 
 export interface SceneAction {
   type: string;
@@ -75,6 +78,11 @@ export interface ThinkContext {
   roomPrompt: string;
   /** Phase 5 — tourist/resident/native. Agents soften or tighten on this. */
   difficulty: Difficulty;
+  /** 3-act bible authored with the day. Agents improvise inside the current
+   *  act's pressure; director can advance the act. Null before first gen. */
+  storyBible: StoryBible | null;
+  /** Which act index (0–2) is live and when it started. */
+  storyState: StoryState | null;
 }
 
 export interface SceneAgentImpl {
@@ -113,6 +121,8 @@ export interface DispatcherCtx {
   anchors: string[];
   roomPrompt: string;
   difficulty: Difficulty;
+  storyBible: StoryBible | null;
+  storyState: StoryState | null;
   /**
    * Invoked when an agent's decided action is `{type: "spawn"}`. Returns
    * the new agent seed when admitted, or null when rejected. The
@@ -123,6 +133,9 @@ export interface DispatcherCtx {
     action: SceneAction,
     now: number,
   ) => Promise<SpawnedNpcSeed | null>;
+  /** Called when the director emits an `advance-act` action. Returns true
+   *  if the act actually advanced (false when already at the final act). */
+  onAdvanceAct?: (reason: string) => Promise<boolean>;
 }
 
 /**
@@ -170,6 +183,8 @@ export async function dispatchDueAgents(
         anchors: ctx.anchors,
         roomPrompt: ctx.roomPrompt,
         difficulty: ctx.difficulty,
+        storyBible: ctx.storyBible,
+        storyState: ctx.storyState,
       });
       agent.nextWakeAt = result.nextWakeAt;
       agent.lastThinkAt = ctx.now;
@@ -195,6 +210,29 @@ export async function dispatchDueAgents(
       console.log(
         `[scene-agents] decided ${agent.id} | action=${actionStr} | next=+${cadenceSec}s | reason="${result.reason}"`,
       );
+
+      if (
+        result.action &&
+        result.action.type === ADVANCE_ACT_ACTION_TYPE &&
+        ctx.onAdvanceAct
+      ) {
+        try {
+          const reason =
+            (typeof result.action.text === "string" && result.action.text.trim()) ||
+            result.reason;
+          const advanced = await ctx.onAdvanceAct(reason);
+          if (advanced) {
+            console.log(
+              `[scene-agents] act advanced via ${agent.id}: "${reason.slice(0, 80)}"`,
+            );
+          }
+        } catch (advErr) {
+          console.error(
+            `[scene-agents] onAdvanceAct for ${agent.id} threw:`,
+            advErr,
+          );
+        }
+      }
 
       if (
         result.action &&

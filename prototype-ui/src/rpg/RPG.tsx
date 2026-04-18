@@ -19,7 +19,6 @@ import {
   simHour,
   SCENES,
   applyScene,
-  fetchDirective,
   loadState,
   saveState,
   clearSaved,
@@ -63,12 +62,10 @@ import { pushBuilding, pushRoom, pullAll, enqueuePush, getDeviceId, releaseLock 
 import { clearSession, getUserId } from "./auth";
 import { useHearth, slugify, stripNpcPrefix } from "./useHearth";
 import { StageConsole } from "./StageConsole";
-import {
-  characterFromNpc,
-  charactersFromHello,
-  npcCharId,
-  sceneFromHello,
-} from "./hearth-projection";
+import { MapView } from "../phaser/MapView";
+import { DirectorNarration } from "../phaser/DirectorNarration";
+import { ThinkingTicker } from "../phaser/ThinkingTicker";
+import { ActBanner } from "../phaser/ActBanner";
 import type { PullResult } from "./sync";
 import {
   INGREDIENTS,
@@ -552,7 +549,6 @@ export function RPG() {
       };
       live.roomContext = prompt;
       stateRef.current = live;
-      projectedSceneIdRef.current = null;
       bld.activeRoomId = live.roomId;
       bld.lastPlayedAt = Date.now();
       ensureProgressState(bld);
@@ -582,24 +578,12 @@ export function RPG() {
   };
 
 
-  const onSubmitDirective = async () => {
+  const onSubmitDirective = () => {
     const text = directive.trim();
     if (!text) return;
-    if (stateRef.current.tension >= 100) return;
-    setNarratorThinking(true);
-    setLlmFallbackReason(null);
-    try {
-      const plan = await fetchDirective(stateRef.current, text);
-      const live = stateRef.current;
-      if (plan) live.planQueue.push(plan);
-      live.roomContext = `${live.roomContext} → ${text}`;
-      setDirective("");
-    } catch (e) {
-      setLlmFallbackReason(e instanceof Error ? e.message : String(e));
-    } finally {
-      setNarratorThinking(false);
-      setState({ ...stateRef.current });
-    }
+    const sent = hearth.sendDirective(text);
+    if (!sent) return;
+    setDirective("");
   };
 
   const pending = state.pending;
@@ -718,39 +702,10 @@ export function RPG() {
     inviteToken: urlInviteToken,
   });
 
-  // Project Hearth's hello into engine state. The hello carries the room's
-  // tilemap, anchors, palette, and the day's NPC roster — Hearth is the
-  // source of truth for all of it. Each unique scene id only projects once
-  // per session so re-renders don't reset character positions / motion.
-  const projectedSceneIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    const hello = hearth.hello;
-    if (!hello) return;
-    const wireSceneId = hello.scene?.id ?? null;
-    if (!wireSceneId) return;
-    if (projectedSceneIdRef.current === wireSceneId) return;
-    if (!hello.scene.tilemap || hello.scene.tilemap.length === 0) return;
-    const scene = sceneFromHello(hello);
-    const characters = charactersFromHello(hello, scene);
-    const live = stateRef.current;
-    applyScene(live, scene);
-    if (characters.length > 0) live.characters = characters;
-    // Clear the bootstrap "Waking the room…" typewriter now that the real
-    // scene has landed — real agent narration will replace it.
-    live.pending = null;
-    live.narrationQueue = [];
-    // Now flip into the playing phase. The loading overlay has been held
-    // over the card-picking page until this moment; the view transitions
-    // to the canvas with the room already renderable.
-    if (live.phase !== "playing") {
-      const now = performance.now();
-      live.phase = "playing";
-      live.simStartedAt = now;
-      live.lastAmbient = now;
-    }
-    projectedSceneIdRef.current = wireSceneId;
-    setState({ ...live });
-  }, [hearth.hello]);
+  // Phaser v1 slice: the room's geometry arrives via SceneWire.rooms and is
+  // rendered directly by <MapView>. Engine-side Scene projection has been
+  // retired; engine state stays around for dialog authoring / storage but
+  // no longer ingests wire tilemaps.
 
   // Clear the signal-check overlay once the scene has landed. Until
   // then the signals are computed in-render from hearth.status /
@@ -767,22 +722,6 @@ export function RPG() {
     const t = window.setTimeout(() => setRoomLoading(null), 450);
     return () => window.clearTimeout(t);
   }, [loadingActive, state.scene?.id, hearth.hello]);
-
-  // Mid-day spawns: incrementally append a Character for each newly
-  // arrived NPC without resetting existing characters' motion state.
-  useEffect(() => {
-    if (hearth.spawnedNpcs.length === 0) return;
-    const live = stateRef.current;
-    if (!live.scene) return;
-    let added = false;
-    for (const ev of hearth.spawnedNpcs) {
-      const id = npcCharId(ev.npc.name);
-      if (live.characters.some((c) => c.id === id)) continue;
-      live.characters = [...live.characters, characterFromNpc(ev.npc, live.scene)];
-      added = true;
-    }
-    if (added) setState({ ...live });
-  }, [hearth.spawnedNpcs]);
 
   // Mirror Hearth moments onto the canvas. "say" → gold dialog bubble above
   // the speaker; "do" → bronze action caption; director moments → a
@@ -1444,58 +1383,29 @@ export function RPG() {
         <div className="rp-canvas-frame">
           <canvas
             ref={canvasRef}
-            className={`rp-canvas ${state.pending ? "is-skippable" : ""} ${isDragging ? "is-dragging" : ""}`}
-            onPointerDown={(e) => {
-              if (e.button !== 0 && e.pointerType === "mouse") return;
-              dragRef.current = {
-                active: true,
-                pointerId: e.pointerId,
-                startX: e.clientX,
-                startCamX: camRef.current.worldX,
-                moved: 0,
-              };
-              e.currentTarget.setPointerCapture(e.pointerId);
-              setIsDragging(true);
-            }}
-            onPointerMove={(e) => {
-              const d = dragRef.current;
-              if (!d.active || d.pointerId !== e.pointerId) return;
-              const dx = e.clientX - d.startX;
-              if (Math.abs(dx) > d.moved) d.moved = Math.abs(dx);
-              const zoom = camRef.current.zoom || 1;
-              // Drag right → scene shifts right → camera.worldX decreases.
-              camRef.current.worldX = d.startCamX - dx / zoom;
-            }}
-            onPointerUp={(e) => {
-              const d = dragRef.current;
-              if (d.pointerId !== e.pointerId) return;
-              d.active = false;
-              d.pointerId = null;
-              if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-                e.currentTarget.releasePointerCapture(e.pointerId);
-              }
-              setIsDragging(false);
-            }}
-            onPointerCancel={(e) => {
-              const d = dragRef.current;
-              if (d.pointerId !== e.pointerId) return;
-              d.active = false;
-              d.pointerId = null;
-              d.moved = 0;
-              setIsDragging(false);
-            }}
-            onClick={(e) => {
-              // Suppress skip when the pointer moved more than a threshold —
-              // that was a pan, not a tap.
-              if (dragRef.current.moved > 6) {
-                dragRef.current.moved = 0;
-                return;
-              }
-              dragRef.current.moved = 0;
-              if (state.pending) onSkipLine();
-            }}
-            title={state.pending ? "Click to skip · drag to pan" : "Drag to pan"}
+            className={`rp-canvas ${state.pending ? "is-skippable" : ""}`}
+            onClick={state.pending ? onSkipLine : undefined}
+            title={state.pending ? "Click to skip this line" : undefined}
+            style={{ display: "none" }}
           />
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              pointerEvents: "none",
+            }}
+          >
+            <MapView
+              scene={hearth.hello?.scene ?? null}
+              npcs={hearth.hello?.dailyPlan?.npcs ?? []}
+            />
+          </div>
+          <ActBanner
+            storyBible={hearth.storyBible}
+            storyState={hearth.storyState}
+          />
+          <DirectorNarration />
+          <ThinkingTicker />
           <div className="rp-hud-top" aria-hidden={false}>
             <div className="rp-top-center">
               <h1 className="rp-floor-title">FLOOR {state.floorIndex >= 0 ? state.floorIndex + 1 : ""}</h1>

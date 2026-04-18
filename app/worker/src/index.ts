@@ -2181,6 +2181,75 @@ export default {
       return handleTest(request, env);
     }
 
+    if (url.pathname === "/api/debug/force-move" && request.method === "POST") {
+      if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+        return new Response("dev-only", { status: 403 });
+      }
+      const body = (await request.json().catch(() => ({}))) as {
+        userId?: string;
+        roomId?: string;
+      };
+      const userId = body.userId;
+      const roomId = body.roomId;
+      if (!userId || !roomId) {
+        return new Response("need userId + roomId", {
+          status: 400,
+          headers: CORS_HEADERS,
+        });
+      }
+      const stub = env.HEARTH.get(env.HEARTH.idFromName(`${userId}:${roomId}`));
+      return stub.fetch("https://internal/debug/force-move", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    // Dev-only: force the Hearth DO alarm to fire immediately. Lets us watch
+    // the autonomous agent dispatcher produce think/act cycles without
+    // waiting for self-chosen nextWakeAt gaps (which are often 10+ minutes).
+    if (
+      (url.pathname === "/api/debug/tick" ||
+        url.pathname === "/api/debug/state") &&
+      (request.method === "POST" || request.method === "GET")
+    ) {
+      if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+        return new Response("dev-only", { status: 403 });
+      }
+      const userId = url.searchParams.get("userId");
+      const roomId = url.searchParams.get("roomId");
+      if (!userId || !roomId) {
+        return new Response("need userId + roomId query", {
+          status: 400,
+          headers: CORS_HEADERS,
+        });
+      }
+      const stub = env.HEARTH.get(env.HEARTH.idFromName(`${userId}:${roomId}`));
+      const target = url.pathname.replace("/api/debug/", "/debug/");
+      return stub.fetch(`https://internal${target}`, {
+        method: request.method,
+      });
+    }
+
+    if (
+      url.pathname === "/api/debug/tick-all" &&
+      request.method === "POST"
+    ) {
+      if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+        return new Response("dev-only", { status: 403 });
+      }
+      const userId = url.searchParams.get("userId");
+      const roomId = url.searchParams.get("roomId");
+      if (!userId || !roomId) {
+        return new Response("need userId + roomId query", {
+          status: 400,
+          headers: CORS_HEADERS,
+        });
+      }
+      const stub = env.HEARTH.get(env.HEARTH.idFromName(`${userId}:${roomId}`));
+      return stub.fetch(`https://internal/debug/tick-all`, { method: "POST" });
+    }
+
     if (url.pathname === "/api/session") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
         return new Response("expected websocket upgrade", { status: 426 });

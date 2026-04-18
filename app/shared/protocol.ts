@@ -45,17 +45,43 @@ export interface CardWire {
 }
 
 /**
- * Renderer override for a non-native tilemap glyph. Only needed when the
- * room author introduces a glyph the engine doesn't already know about —
- * the native set (#, R, |, ~, w, b, t, c, l, =, ., space) renders without
- * a palette entry.
+ * A single named position inside a room — the addressable target of an
+ * NPC's move action. `kind` distinguishes plain anchors from portal
+ * endpoints; portals additionally list their counterpart in `leadsTo`.
  */
-export interface ScenePaletteEntry {
+export interface ObjectWire {
+  kind: "anchor" | "door" | "stair" | "spawn";
   name: string;
-  /** #rrggbb hex. */
-  color: string;
-  walkable: boolean;
-  glow?: boolean;
+  /** Tile coordinates inside the room (0-indexed, integers). */
+  x: number;
+  y: number;
+  /** Only set for portal objects; names the other end of the portal. */
+  leadsTo?: { roomId: string; objectName: string };
+}
+
+export interface RoomWire {
+  id: string;
+  name: string;
+  cols: number;
+  rows: number;
+  /**
+   * 2D array of semantic tile keys, one per cell. Keys come from
+   * `shared/tileset.ts#TILESET_KEYS`. Outer array is rows, inner is cols.
+   */
+  ground: string[][];
+  /**
+   * Collision grid — same shape as `ground`. `true` blocks movement.
+   * Authored alongside ground so the client can seed pathfinding
+   * without re-deriving walkability.
+   */
+  collision: boolean[][];
+  objects: ObjectWire[];
+}
+
+export interface RoomPortalWire {
+  from: { roomId: string; objectName: string };
+  to: { roomId: string; objectName: string };
+  bidirectional?: boolean;
 }
 
 export interface SceneWire {
@@ -64,20 +90,26 @@ export interface SceneWire {
   timeOfDay: "dawn" | "day" | "dusk" | "night";
   moods: string[];
   npcs: string[];
-  /** Named anchors — agents move by anchor name. */
+  /**
+   * Flat list of anchor addresses agents may target. Single-room scenes
+   * use bare names ("door", "hearth"); multi-room scenes may use the
+   * dotted form "<roomId>.<objectName>".
+   */
   anchors: string[];
   /**
-   * Hearth-authored room geometry. Present whenever the DO has built a
-   * RoomPlan for this room (always, after Phase 6E.2). Clients use these
-   * fields as the source of truth — local map authoring is gone.
+   * Tileset pack the client should render with. Client refuses to render
+   * unknown refs (falls back to stub tiles); worker-client mismatches are
+   * explicit rather than silent corruption.
    */
-  tilemap?: string[];
-  floorY?: number;
-  /** name → [x, y] tile coords. Same names appear in `anchors`. */
-  anchorCoords?: Record<string, [number, number]>;
-  /** Glyph → renderer override. Omitted when room uses only native glyphs. */
-  palette?: Record<string, ScenePaletteEntry>;
-  /** "ai" when the LLM authored this room; "fallback" when procedural. */
+  tilesetRef?: string;
+  /** One or more rooms that make up this scene. Single-room in the v1 slice. */
+  rooms?: RoomWire[];
+  /**
+   * Portal graph edges between rooms. Empty in the v1 slice (single-room).
+   * Clients stitch rooms into a super-grid using these edges when present.
+   */
+  portals?: RoomPortalWire[];
+  /** "ai" when the LLM authored this scene; "fallback" when procedural. */
   source?: "ai" | "fallback";
 }
 
@@ -112,6 +144,34 @@ export interface DailyPlan {
   seed: string;
 }
 
+/** One act in a 3-act story bible. The agents improvise scenes that serve
+ *  this act's pressure; the director is responsible for advancing to the
+ *  next act when the exit condition is met. */
+export interface StoryAct {
+  /** Short label — "Act I", "Act II", "Act III" or a thematic name. */
+  name: string;
+  /** One-sentence premise that frames every decision inside this act. */
+  premise: string;
+  /** The dramatic pressure agents lean into during this act. */
+  pressure: string;
+  /** 3–5 bullet beats the agents should aim to hit inside this act. */
+  beats: string[];
+  /** The condition that should trigger advance to the next act. */
+  exit: string;
+}
+
+export interface StoryBible {
+  logline: string;
+  theme: string;
+  acts: StoryAct[];
+}
+
+export interface StoryState {
+  currentActIndex: number;
+  actStartedAtGameHour: number;
+  lastAdvanceReason?: string;
+}
+
 export interface RunClock {
   gameHour: number;
   gameMinute: number;
@@ -131,6 +191,10 @@ export interface ServerHello {
   tree: TreeSnapshot;
   footsteps: number;
   dailyPlan: DailyPlan;
+  /** 3-act story bible. Agents improvise inside the current act's pressure. */
+  storyBible: StoryBible;
+  /** Where the story is right now (current act + when it started). */
+  storyState: StoryState;
   clock: RunClock;
   /** True when today's in-game schedule has run out — client should show
    *  "come back tomorrow" rather than letting the player play. */
@@ -287,6 +351,20 @@ export interface ServerInviteRotated {
   inviteToken: string;
 }
 
+/** The story advanced from one act to the next. */
+export interface ServerStoryAdvanced {
+  type: "story-advanced";
+  storyState: StoryState;
+}
+
+/** Ack that a player directive was accepted and queued for the next
+ *  dispatch. Mostly so the client can light up the input and echo back. */
+export interface ServerDirectiveAccepted {
+  type: "directive-accepted";
+  text: string;
+  at: number;
+}
+
 export type ServerMessage =
   | ServerHello
   | ServerToken
@@ -301,7 +379,9 @@ export type ServerMessage =
   | ServerNpcSpawned
   | ServerPresenceChanged
   | ServerHealthSnapshot
-  | ServerInviteRotated;
+  | ServerInviteRotated
+  | ServerStoryAdvanced
+  | ServerDirectiveAccepted;
 
 // ─── Client → Server ───────────────────────────────────────────────────────
 
@@ -325,8 +405,17 @@ export interface ClientRotateInvite {
   type: "rotate-invite";
 }
 
+/** Owner typed a "what happens next?" directive. Pushed as a high-salience
+ *  SceneEvent for the next dispatch so NPCs + director see and react inside
+ *  the current act's pressure. */
+export interface ClientDirective {
+  type: "player-directive";
+  text: string;
+}
+
 export type ClientMessage =
   | ClientPlay
   | ClientPing
   | ClientSetDifficulty
-  | ClientRotateInvite;
+  | ClientRotateInvite
+  | ClientDirective;

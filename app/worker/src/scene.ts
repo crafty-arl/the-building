@@ -5,11 +5,12 @@
 
 import type {
   DailyPlan,
+  RoomPortalWire,
+  RoomWire,
   RunClock,
-  ScenePaletteEntry,
 } from "../../shared/protocol.ts";
 import { slotForHour, timeOfDayForHour } from "./daily-plan.ts";
-import type { RoomPlan } from "./room-plan.ts";
+import { floorAnchorList, type FloorPlan } from "./floor-plan.ts";
 
 export interface Scene {
   id: string;
@@ -20,11 +21,10 @@ export interface Scene {
   hooks: string[];
   authoredPrompt: string;
   anchors: string[];
-  /** Hearth-authored geometry. Populated when the DO has a RoomPlan. */
-  tilemap?: string[];
-  floorY?: number;
-  anchorCoords?: Record<string, [number, number]>;
-  palette?: Record<string, ScenePaletteEntry>;
+  /** Hearth-authored geometry. Populated when the DO has a FloorPlan. */
+  tilesetRef?: string;
+  rooms?: RoomWire[];
+  portals?: RoomPortalWire[];
   source?: "ai" | "fallback";
 }
 
@@ -59,8 +59,8 @@ export const TAVERN: Scene = {
  * in-game hour and add plan residents to the NPC roster alongside the Stranger.
  * If the room authored its own anchors, those replace the inn defaults.
  *
- * When `plan` is a `RoomPlan` (Phase 6E.2+), the room geometry (tilemap,
- * anchor coords, palette) flows through onto the Scene so the client can
+ * When `plan` is a `FloorPlan`, the floor geometry (rooms, portals,
+ * tilesetRef) flows through onto the Scene so the Phaser client can
  * render whatever Hearth authored.
  */
 export function buildScene(
@@ -69,11 +69,11 @@ export function buildScene(
   opts?: { anchors?: string[]; location?: string },
 ): Scene {
   const extraNpcs = plan.npcs.map((n) => n.name);
-  const room = isRoomPlan(plan) ? plan : null;
-  // Anchor list comes from room.anchors keys when present, else the explicit
-  // override in opts, else the legacy tavern defaults.
-  const anchors = room
-    ? Object.keys(room.anchors)
+  const floor = isFloorPlan(plan) ? plan : null;
+  // Anchor list comes from the floor's flattened object names when present,
+  // else the explicit override in opts, else the legacy tavern defaults.
+  const anchors = floor
+    ? floorAnchorList(floor)
     : opts?.anchors && opts.anchors.length > 0
       ? opts.anchors
       : TAVERN.anchors;
@@ -81,8 +81,8 @@ export function buildScene(
   // only when no RoomPlan exists (pre-6E.2 sessions, test doubles). The
   // Stranger is only injected when we're actually in the tavern — rooms
   // with their own authored cast shouldn't inherit him.
-  const location = opts?.location ?? room?.name ?? TAVERN.location;
-  const npcs = room ? extraNpcs : [...TAVERN.npcs, ...extraNpcs];
+  const location = opts?.location ?? floor?.rooms[0]?.name ?? TAVERN.location;
+  const npcs = floor ? extraNpcs : [...TAVERN.npcs, ...extraNpcs];
   const base: Scene = {
     ...TAVERN,
     id: `day-${plan.date}-${clock.gameHour.toString().padStart(2, "0")}`,
@@ -91,19 +91,18 @@ export function buildScene(
     npcs,
     anchors,
   };
-  if (room) {
-    base.tilemap = room.tilemap;
-    base.floorY = room.floorY;
-    base.anchorCoords = room.anchors;
-    if (room.palette) base.palette = room.palette;
-    base.source = room.source;
+  if (floor) {
+    base.tilesetRef = floor.tilesetRef;
+    base.rooms = floor.rooms;
+    base.portals = floor.portals;
+    base.source = floor.source;
   }
   return base;
 }
 
-/** Type guard: is this DailyPlan actually a RoomPlan with geometry? */
-function isRoomPlan(p: DailyPlan): p is RoomPlan {
-  return Array.isArray((p as RoomPlan).tilemap);
+/** Type guard: is this DailyPlan actually a FloorPlan with rooms? */
+function isFloorPlan(p: DailyPlan): p is FloorPlan {
+  return Array.isArray((p as FloorPlan).rooms);
 }
 
 export const STRANGER = {
