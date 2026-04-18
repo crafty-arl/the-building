@@ -16,6 +16,7 @@ import type {
 import { getUserId } from "./auth";
 import { currentRoomId, loadRoomById } from "./engine";
 import { BUS_EVENTS, bus } from "../phaser/bus";
+import { resetSyncBackoff } from "./sync";
 
 export type HearthStatus = "idle" | "connecting" | "open" | "closed" | "error";
 
@@ -115,7 +116,7 @@ const WS_BASE =
 
 const MAX_MOMENTS = 30;
 
-export function useHearth(opts: { enabled: boolean; inviteToken?: string | null }): UseHearthResult {
+export function useHearth(opts: { enabled: boolean; roomId: string | null; inviteToken?: string | null }): UseHearthResult {
   const [status, setStatus] = useState<HearthStatus>("idle");
   const [hello, setHello] = useState<HearthHello | null>(null);
   const [terminal, setTerminal] = useState<HearthTerminal | null>(null);
@@ -137,10 +138,18 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffMs = 500;
 
+    // Reset hello/agents/moments when roomId switches so the prior floor's
+    // cast and narrative don't bleed into the next one's UI during the
+    // window between WS close and the new hello landing.
+    setHello(null);
+    setAgents({});
+    setMoments([]);
+    setSpawnedNpcs([]);
+
     const connect = () => {
       if (cancelled) return;
       const userId = getUserId() ?? "dev-user";
-      const roomId = currentRoomId();
+      const roomId = opts.roomId ?? currentRoomId();
       if (!roomId) {
         setStatus("idle");
         if (reconnectTimer) return;
@@ -179,6 +188,7 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
         backoffMs = 500;
         setStatus("open");
         setTerminal(null);
+        resetSyncBackoff();
       });
 
       const scheduleReconnect = () => {
@@ -381,7 +391,7 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
       try { wsRef.current?.close(); } catch { /* ignore */ }
       wsRef.current = null;
     };
-  }, [opts.enabled, opts.inviteToken]);
+  }, [opts.enabled, opts.roomId, opts.inviteToken]);
 
   const npcsByAgentId = useMemo(() => {
     const map: Record<string, NpcDay> = {};

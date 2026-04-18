@@ -392,10 +392,27 @@ export class Hearth implements DurableObject {
     this.state.acceptWebSocket(server);
     server.serializeAttachment(attachment);
 
-    await this.ensureRunStartedAndHello(server);
-    // Tell every socket the roster changed. New observer joining doesn't
-    // rebuild hellos for existing peers — just a lightweight presence diff.
-    this.broadcast({ type: "presence-changed", peers: this.peers() });
+    // Fire-and-forget the plan/narration work so the 101 response returns
+    // immediately. If we await this, the WebSocket stays in CONNECTING on
+    // the client for the full 5–30s it takes to generate the room plan
+    // and opening narration — which looks exactly like "UPLINK stuck."
+    // The hello frame is sent over `server` once the async work finishes;
+    // the client already has an OPEN socket by then and just receives it.
+    this.ensureRunStartedAndHello(server)
+      .then(() => {
+        this.broadcast({ type: "presence-changed", peers: this.peers() });
+      })
+      .catch((err) => {
+        console.error("[hearth] ensureRunStartedAndHello failed:", err);
+        // Close with a non-1000 code so useHearth triggers its reconnect
+        // backoff — a transient LLM failure shouldn't leave the client
+        // stranded without any signal.
+        try {
+          server.close(1011, "boot-failed");
+        } catch {
+          // socket already gone
+        }
+      });
 
     return new Response(null, { status: 101, webSocket: client });
   }

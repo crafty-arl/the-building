@@ -77,13 +77,19 @@ export function buildScene(
     : opts?.anchors && opts.anchors.length > 0
       ? opts.anchors
       : TAVERN.anchors;
+  // Room-authored plans own their own identity; TAVERN stays as the seed
+  // only when no RoomPlan exists (pre-6E.2 sessions, test doubles). The
+  // Stranger is only injected when we're actually in the tavern — rooms
+  // with their own authored cast shouldn't inherit him.
+  const location = opts?.location ?? floor?.rooms[0]?.name ?? TAVERN.location;
+  const npcs = floor ? extraNpcs : [...TAVERN.npcs, ...extraNpcs];
   const base: Scene = {
     ...TAVERN,
     id: `day-${plan.date}-${clock.gameHour.toString().padStart(2, "0")}`,
     timeOfDay: timeOfDayForHour(clock.gameHour),
-    npcs: [...TAVERN.npcs, ...extraNpcs],
+    location,
+    npcs,
     anchors,
-    ...(opts?.location ? { location: opts.location } : {}),
   };
   if (floor) {
     base.tilesetRef = floor.tilesetRef;

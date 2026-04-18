@@ -276,10 +276,32 @@ export function RPG() {
   const camRef = useRef<{ worldX: number; zoom: number }>({ worldX: 0, zoom: 1 });
   // Canvas CSS size in logical pixels, updated by ResizeObserver.
   const canvasSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+  // Pointer-drag to pan the camera horizontally. While `active` is true the
+  // follow camera is disabled so user input isn't fought by `stepCamera`.
+  const dragRef = useRef<{
+    active: boolean;
+    pointerId: number | null;
+    startX: number;
+    startCamX: number;
+    moved: number;
+  }>({ active: false, pointerId: null, startX: 0, startCamX: 0, moved: 0 });
+  const [isDragging, setIsDragging] = useState(false);
   // Most recent character that moved or spoke — used to pick the camera's
   // follow target so the camera prefers whoever is "active" right now.
   const lastActiveRef = useRef<string | null>(null);
   const pausedAtRef = useRef<number | null>(null);
+  // Screen-space director/narrator banner driven by Hearth moments from
+  // agentId === "director". Rendered in the canvas draw loop as an overlay,
+  // not part of the engine's GameState.
+  const directorBeatRef = useRef<{
+    text: string;
+    kind: string;
+    reason: string;
+    until: number;
+  } | null>(null);
+  // Tracks how many hearth.moments we've already mirrored onto character
+  // bubbles so each moment fires exactly once on the canvas.
+  const momentsMirroredRef = useRef(0);
 
   useEffect(() => {
     let raf = 0;
@@ -388,13 +410,25 @@ export function RPG() {
 
       // Target x (world px) is the follow character's center.
       const targetX = follow ? (follow.pos.x + 0.5) * TILE_PX : worldW / 2;
-      camRef.current.worldX = stepCamera(
-        camRef.current,
-        targetX,
-        cssW,
-        worldW,
-        zoom,
-      ).worldX;
+      if (dragRef.current.active) {
+        // User is panning — clamp to world bounds; skip follow.
+        const scaledWorldW = worldW * zoom;
+        if (scaledWorldW <= cssW) {
+          camRef.current.worldX = (worldW - cssW / zoom) / 2;
+        } else {
+          const maxX = worldW - cssW / zoom;
+          if (camRef.current.worldX < 0) camRef.current.worldX = 0;
+          else if (camRef.current.worldX > maxX) camRef.current.worldX = maxX;
+        }
+      } else {
+        camRef.current.worldX = stepCamera(
+          camRef.current,
+          targetX,
+          cssW,
+          worldW,
+          zoom,
+        ).worldX;
+      }
 
       // Reset to identity, clear.
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -441,6 +475,7 @@ export function RPG() {
         camWorldY,
         zoom,
       );
+      drawDirectorBeat(ctx, directorBeatRef.current, now, cssW);
 
       raf = requestAnimationFrame(draw);
     };
@@ -452,10 +487,10 @@ export function RPG() {
   const [llmFallbackReason, setLlmFallbackReason] = useState<string | null>(null);
   const [roomPrompt, setRoomPrompt] = useState("");
   const [directive, setDirective] = useState("");
-  const [roomProgress, setRoomProgress] = useState<{
-    pct: number;
-    stage: string;
-  } | null>(null);
+  // `null` when idle. When a floor is loading, we only need to know
+  // that loading is active — the individual signal states are derived
+  // in the render from hearth.status / hearth.hello / state.scene.id.
+  const [roomLoading, setRoomLoading] = useState<{ startedAt: number } | null>(null);
   const [showNewRoomForm, setShowNewRoomForm] = useState(false);
   const [selectedIngredients, setSelectedIngredients] = useState<string[]>([]);
   const [selectedSurvivors, setSelectedSurvivors] = useState<string[]>([]);
@@ -467,7 +502,10 @@ export function RPG() {
     setLlmFallbackReason(null);
     const now = performance.now();
 
-    setRoomProgress({ pct: 10, stage: "waking the room…" });
+    // Kick off the signal-check overlay. Individual signal states
+    // (UPLINK / HANDSHAKE / WEAVE / STAGE) are derived in-render from
+    // real hearth milestones; this ref just marks that loading is live.
+    setRoomLoading({ startedAt: performance.now() });
 
     try {
       // Every floor lives inside the building — materialize one if the player
@@ -490,7 +528,15 @@ export function RPG() {
       live.roomId = newRoomId();
       live.roomPrompt = prompt;
       live.buildingId = bld.id;
-      live.floorIndex = bld.floors.length;
+      // New floors stack above existing ones in the same building: sealed
+      // floors + any in-progress rooms already saved for this building.
+      // Without this, every unsealed IGNITE got floorIndex=0 and rendered
+      // as another "FLOOR 1" in parallel instead of floor 2, 3, …
+      const sealedIds = new Set(bld.floors.map((f) => f.id));
+      const activeForBld = listRooms().filter(
+        (r) => r.buildingId === bld.id && !sealedIds.has(r.id),
+      ).length;
+      live.floorIndex = bld.floors.length + activeForBld;
       live.inheritedMemory = buildInheritedMemory(bld);
       live.simStartedAt = now;
       live.lastAmbient = now;
@@ -520,13 +566,11 @@ export function RPG() {
       // from CURRENT_KEY on its first connect attempt (otherwise it races
       // the tick loop's autosave and can connect with a stale roomId).
       saveState(live);
-      setRoomProgress({ pct: 100, stage: "connecting…" });
-      window.setTimeout(() => setRoomProgress(null), 500);
       setSelectedIngredients([]);
       setSelectedSurvivors([]);
     } catch (e) {
       setLlmFallbackReason(e instanceof Error ? e.message : String(e));
-      setRoomProgress(null);
+      setRoomLoading(null);
     } finally {
       setNarratorThinking(false);
       setState({ ...stateRef.current });
@@ -647,8 +691,14 @@ export function RPG() {
       return null;
     }
   }, []);
+  // Enable Hearth during active loading too — the WS must start
+  // connecting the moment IGNITE fires so the user sees real progress
+  // (connecting → open → hello → scene) while still on the card-picking
+  // page. Without this, the loading bar would only start moving after
+  // the phase flip, which now happens at scene projection.
   const hearth = useHearth({
-    enabled: state.phase === "playing",
+    enabled: state.phase === "playing" || !!roomLoading,
+    roomId: state.roomId || null,
     inviteToken: urlInviteToken,
   });
 
@@ -656,6 +706,78 @@ export function RPG() {
   // rendered directly by <MapView>. Engine-side Scene projection has been
   // retired; engine state stays around for dialog authoring / storage but
   // no longer ingests wire tilemaps.
+
+  // Clear the signal-check overlay once the scene has landed. Until
+  // then the signals are computed in-render from hearth.status /
+  // hearth.hello / state.scene.id, no intermediate state required.
+  const loadingActive = !!roomLoading;
+  useEffect(() => {
+    if (!loadingActive) return;
+    const wantedSceneId = hearth.hello?.scene?.id ?? null;
+    const sceneReady =
+      !!wantedSceneId && state.scene?.id === wantedSceneId;
+    if (!sceneReady) return;
+    // Hold the "LAUNCH" flash one beat so the final light isn't a jump
+    // cut before the room view takes over.
+    const t = window.setTimeout(() => setRoomLoading(null), 450);
+    return () => window.clearTimeout(t);
+  }, [loadingActive, state.scene?.id, hearth.hello]);
+
+  // Mirror Hearth moments onto the canvas. "say" → gold dialog bubble above
+  // the speaker; "do" → bronze action caption; director moments → a
+  // narrator banner across the top of the canvas. Without this bridge the
+  // log pane was the only place these beats appeared.
+  useEffect(() => {
+    const moms = hearth.moments;
+    if (moms.length === momentsMirroredRef.current) return;
+    const live = stateRef.current;
+    const now = performance.now();
+    const fresh = moms.slice(momentsMirroredRef.current);
+    momentsMirroredRef.current = moms.length;
+    for (const m of fresh) {
+      const action = m.action;
+      if (!action) continue;
+      const text = (action.text ?? "").trim();
+      if (m.agentId === "director") {
+        if (!text) continue;
+        directorBeatRef.current = {
+          text,
+          kind: action.type || "beat",
+          reason: m.reason,
+          until: now + 12000,
+        };
+        continue;
+      }
+      if (!text) continue;
+      const c = live.characters.find((ch) => ch.id === m.agentId);
+      if (!c) continue;
+      if (action.type === "say") {
+        c.speech = { text, kind: "say", until: now + 9000 };
+      } else if (action.type === "do") {
+        c.speech = { text, kind: "do", until: now + 6500 };
+      }
+    }
+  }, [hearth.moments]);
+
+  // Thinking bubbles: while an agent is mid-stream, float a dashed thought
+  // cloud above them. Cleared the moment their `thinking` buffer empties
+  // (which useHearth does on `agent-decided`), leaving room for the real
+  // say/do bubble that follows.
+  useEffect(() => {
+    const live = stateRef.current;
+    const now = performance.now();
+    for (const c of live.characters) {
+      const ag = hearth.agents[c.id];
+      const isThinking = !!ag && ag.thinking.length > 0;
+      if (isThinking) {
+        if (!c.speech || c.speech.kind === "think") {
+          c.speech = { text: "", kind: "think", until: now + 2000 };
+        }
+      } else if (c.speech && c.speech.kind === "think") {
+        c.speech = null;
+      }
+    }
+  }, [hearth.agents]);
 
   const viewNode: React.ReactNode = (() => {
   if (state.phase === "setup") {
@@ -683,6 +805,22 @@ export function RPG() {
       stateRef.current = loaded;
       resetCodaFlag();
       setState({ ...loaded });
+    };
+
+    const onDeleteRoom = (saved: SavedRoom) => {
+      if (!window.confirm(`Delete floor "${saved.snapshot.scene.name || saved.name}"? This cannot be undone.`)) {
+        return;
+      }
+      deleteRoom(saved.id);
+      // If the deleted room was the building's active one, clear the
+      // pointer so the building view doesn't try to highlight a ghost.
+      if (building && building.activeRoomId === saved.id) {
+        const cleared = { ...building, activeRoomId: null };
+        setBuilding(cleared);
+        void saveBuilding(cleared);
+      }
+      setLibraryTick((t) => t + 1);
+      flashToast("floor deleted");
     };
 
     const onRegenerateRoom = (saved: SavedRoom) => {
@@ -863,41 +1001,41 @@ export function RPG() {
           </div>
 
           <div className="rp-ingr-foot">
-            {roomProgress ? (
-              <div className="rp-progress" role="status" aria-live="polite">
-                <div className="rp-progress-label">{roomProgress.stage}</div>
-                <div className="rp-progress-bar"><div className="rp-progress-fill" style={{ width: `${roomProgress.pct}%` }} /></div>
-                <div className="rp-progress-pct">{roomProgress.pct}%</div>
-              </div>
-            ) : (
-              <>
-                <div className="rp-prompt-mini">
-                  <textarea
-                    className="rp-prompt-text"
-                    placeholder="your prompt appears here — or write your own"
-                    value={roomPrompt}
-                    onChange={(e) => setRoomPrompt(e.target.value)}
-                    disabled={narratorThinking}
-                    spellCheck={false}
-                    rows={1}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className="rp-ignite"
-                  onClick={() => void onGenerateRoom()}
-                  disabled={narratorThinking || !roomPrompt.trim()}
-                >
-                  <span className="rp-ignite-label">
-                    <span className="rp-ignite-title">IGNITE</span>
-                    <span className="rp-ignite-sub">
-                      {narratorThinking ? "composing…" : building ? `open floor ${building.floors.length + 1}` : "open floor"}
-                    </span>
-                  </span>
-                  <span className="rp-ignite-badge">⟶</span>
-                </button>
-              </>
-            )}
+            <div className="rp-prompt-mini">
+              <textarea
+                className="rp-prompt-text"
+                placeholder="your prompt appears here — or write your own"
+                value={roomPrompt}
+                onChange={(e) => setRoomPrompt(e.target.value)}
+                disabled={narratorThinking || !!roomLoading}
+                spellCheck={false}
+                rows={1}
+              />
+            </div>
+            <button
+              type="button"
+              className="rp-ignite"
+              onClick={() => void onGenerateRoom()}
+              disabled={narratorThinking || !!roomLoading || !roomPrompt.trim()}
+            >
+              <span className="rp-ignite-label">
+                <span className="rp-ignite-title">IGNITE</span>
+                <span className="rp-ignite-sub">
+                  {narratorThinking
+                    ? "composing…"
+                    : building
+                    ? (() => {
+                        const sealedIds = new Set(building.floors.map((f) => f.id));
+                        const activeForBld = listRooms().filter(
+                          (r) => r.buildingId === building.id && !sealedIds.has(r.id),
+                        ).length;
+                        return `open floor ${building.floors.length + activeForBld + 1}`;
+                      })()
+                    : "open floor"}
+                </span>
+              </span>
+              <span className="rp-ignite-badge">⟶</span>
+            </button>
             {llmFallbackReason && (
               <p className="rp-fallback-banner" style={{ margin: 0 }}>narrator offline — using notes ({llmFallbackReason})</p>
             )}
@@ -908,10 +1046,22 @@ export function RPG() {
       );
     }
 
-    // Building home / tower view
-    const activeRoom = building?.activeRoomId
-      ? rooms.find((r) => r.id === building.activeRoomId) ?? null
-      : null;
+    // Building home / tower view — render every unsealed floor in this
+    // building, not just `activeRoomId`. Otherwise the header can say
+    // "5 FLOORS" while the list only shows one active card + sealed ones,
+    // because prior unsealed rooms get orphaned from view.
+    const sealedIdSet = new Set(building?.floors.map((f) => f.id) ?? []);
+    const unsealedRoomsForBld = building
+      ? rooms
+          .filter(
+            (r) => r.buildingId === building.id && !sealedIdSet.has(r.id),
+          )
+          .sort(
+            (a, b) =>
+              (b.snapshot.floorIndex ?? 0) - (a.snapshot.floorIndex ?? 0),
+          )
+      : [];
+    const activeRoomId = building?.activeRoomId ?? null;
 
     return (
       <div className="rp-building">
@@ -927,8 +1077,12 @@ export function RPG() {
             <div className="rp-building-stats">
               {building ? (() => {
                 const sealed = building.floors.length;
-                const hasActive = !!building.activeRoomId;
-                const totalFloors = sealed + (hasActive ? 1 : 0);
+                const sealedIds = new Set(building.floors.map((f) => f.id));
+                const activeRooms = rooms.filter(
+                  (r) => r.buildingId === building.id && !sealedIds.has(r.id),
+                );
+                const hasActive = activeRooms.length > 0;
+                const totalFloors = sealed + activeRooms.length;
                 const survivorCount = building.roster.length;
                 const chapters = building.progress?.chapters ?? 0;
                 const seasonName = building.progress?.season.name ?? "";
@@ -937,7 +1091,7 @@ export function RPG() {
                     <span>{totalFloors} {totalFloors === 1 ? "FLOOR" : "FLOORS"}</span>
                     {hasActive && (<>
                       <span className="sep" />
-                      <span className="streak">FLOOR {sealed + 1} LIVE</span>
+                      <span className="streak">FLOOR {totalFloors} LIVE</span>
                     </>)}
                     <span className="sep" />
                     <span>{survivorCount} {survivorCount === 1 ? "SURVIVOR" : "SURVIVORS"}</span>
@@ -996,25 +1150,34 @@ export function RPG() {
               <span className="rp-roof-btn">+</span>
             </button>
 
-            {activeRoom && (() => {
-              const archived = isArchivedRoom(activeRoom);
-              const canRegen = archived && !!(activeRoom.prompt && activeRoom.prompt.trim());
+            {unsealedRoomsForBld.map((room) => {
+              const archived = isArchivedRoom(room);
+              const canRegen = archived && !!(room.prompt && room.prompt.trim());
+              const isLive = room.id === activeRoomId;
+              const floorNum =
+                (room.snapshot.floorIndex ?? building.floors.length) + 1;
               return (
-                <div className={`rp-floor is-active ${archived ? "is-archived" : ""}`} role="listitem">
-                  <div className="rp-floor-num">{building.floors.length + 1}</div>
+                <div
+                  key={room.id}
+                  className={`rp-floor is-active ${archived ? "is-archived" : ""} ${isLive ? "is-live" : ""}`}
+                  role="listitem"
+                >
+                  <div className="rp-floor-num">{floorNum}</div>
                   <div className="rp-floor-body">
-                    <MiniRoomCanvas room={activeRoom} />
+                    <MiniRoomCanvas room={room} />
                     <div className="rp-floor-info">
-                      <div className="rp-floor-name">{activeRoom.snapshot.scene.name || activeRoom.name}</div>
+                      <div className="rp-floor-name">{room.snapshot.scene.name || room.name}</div>
                       {archived ? (
                         <div className="rp-floor-status" style={{ color: "var(--ink-dim)" }}>
                           ARCHIVED FLOOR — TOP-DOWN LAYOUT
                         </div>
                       ) : (
-                        <div className="rp-floor-status">IN PROGRESS · TENSION {Math.round(activeRoom.snapshot.tension)}</div>
+                        <div className="rp-floor-status">
+                          {isLive ? "LIVE · " : "IN PROGRESS · "}TENSION {Math.round(room.snapshot.tension)}
+                        </div>
                       )}
                       <div className="rp-floor-cast">
-                        {activeRoom.snapshot.characters.filter((c) => !c.transient && !c.dead).map((c) => (
+                        {room.snapshot.characters.filter((c) => !c.transient && !c.dead).map((c) => (
                           <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                             <span className="dot" style={{ background: c.palette.cloak }} />
                             {c.name}
@@ -1022,30 +1185,39 @@ export function RPG() {
                         ))}
                       </div>
                     </div>
-                    {archived ? (
-                      canRegen ? (
-                        <button
-                          type="button"
-                          className="rp-floor-enter"
-                          onClick={() => onRegenerateRoom(activeRoom)}
-                          title="Rebuild this floor as a side-elevation layout"
-                        >REGENERATE ›</button>
+                    <div className="rp-floor-actions">
+                      {archived ? (
+                        canRegen ? (
+                          <button
+                            type="button"
+                            className="rp-floor-enter"
+                            onClick={() => onRegenerateRoom(room)}
+                            title="Rebuild this floor as a side-elevation layout"
+                          >REGENERATE ›</button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rp-floor-enter"
+                            disabled
+                            title="No original prompt saved — delete from localStorage to start fresh"
+                            style={{ opacity: 0.5, cursor: "not-allowed" }}
+                          >NO PROMPT</button>
+                        )
                       ) : (
-                        <button
-                          type="button"
-                          className="rp-floor-enter"
-                          disabled
-                          title="No original prompt saved — delete from localStorage to start fresh"
-                          style={{ opacity: 0.5, cursor: "not-allowed" }}
-                        >NO PROMPT</button>
-                      )
-                    ) : (
-                      <button type="button" className="rp-floor-enter" onClick={() => onEnterRoom(activeRoom.id)}>ENTER ›</button>
-                    )}
+                        <button type="button" className="rp-floor-enter" onClick={() => onEnterRoom(room.id)}>ENTER ›</button>
+                      )}
+                      <button
+                        type="button"
+                        className="rp-floor-delete"
+                        onClick={() => onDeleteRoom(room)}
+                        aria-label="Delete floor"
+                        title="Delete this floor"
+                      >×</button>
+                    </div>
                   </div>
                 </div>
               );
-            })()}
+            })}
 
             {building.floors.slice().reverse().map((floor, ri) => (
               <FloorCard key={floor.id} floor={floor} floorNum={building.floors.length - ri} />
@@ -1283,9 +1455,109 @@ export function RPG() {
   const inPlay = state.phase === "playing";
   const spentNow = state.phase === "playing" && state.tension >= 100;
   const liveCast = state.characters.filter((c) => !c.transient && !c.dead);
+  const nextFloorNum = (() => {
+    if (state.floorIndex >= 0) return state.floorIndex + 1;
+    if (building) {
+      const sealedIds = new Set(building.floors.map((f) => f.id));
+      const activeForBld = listRooms().filter(
+        (r) => r.buildingId === building.id && !sealedIds.has(r.id),
+      ).length;
+      return building.floors.length + activeForBld + 1;
+    }
+    return 1;
+  })();
   return (
     <>
       {viewNode}
+
+      {roomLoading && (() => {
+        const helloIn = !!hearth.hello;
+        const wantedSceneId = hearth.hello?.scene?.id ?? null;
+        const sceneIn =
+          !!wantedSceneId && state.scene?.id === wantedSceneId;
+        type Light = "done" | "active" | "pending" | "retry";
+        const uplink: Light =
+          helloIn || hearth.status === "open"
+            ? "done"
+            : hearth.status === "connecting"
+              ? "active"
+              : hearth.status === "error" || hearth.status === "closed"
+                ? "retry"
+                : "active";
+        const handshake: Light = helloIn
+          ? "done"
+          : hearth.status === "open"
+            ? "active"
+            : "pending";
+        const weave: Light = sceneIn
+          ? "done"
+          : helloIn
+            ? "active"
+            : "pending";
+        const stage: Light = sceneIn ? "done" : "pending";
+        const allGreen = sceneIn;
+        const signals: { key: string; label: string; note: string; light: Light }[] = [
+          { key: "alloc", label: "ALLOC FLOOR", note: "locked", light: "done" },
+          {
+            key: "uplink",
+            label: "POLL UPLINK",
+            note:
+              uplink === "done"
+                ? "locked"
+                : uplink === "retry"
+                  ? "retrying…"
+                  : "polling for connection…",
+            light: uplink,
+          },
+          {
+            key: "handshake",
+            label: "AWAIT SIGNAL",
+            note:
+              handshake === "done"
+                ? "received"
+                : handshake === "active"
+                  ? "listening…"
+                  : "—",
+            light: handshake,
+          },
+          {
+            key: "weave",
+            label: "WEAVE ROOM",
+            note:
+              weave === "done"
+                ? "ready"
+                : weave === "active"
+                  ? "drawing walls…"
+                  : "—",
+            light: weave,
+          },
+          {
+            key: "stage",
+            label: "STAGE CAST",
+            note: stage === "done" ? "ready" : "—",
+            light: stage,
+          },
+        ];
+        return (
+          <div className="rp-room-loading" role="status" aria-live="polite">
+            <div className="rp-room-loading-card">
+              <div className="rp-room-loading-title">
+                FLOOR {nextFloorNum} · {allGreen ? "LAUNCH" : "CHECKING SIGNALS"}
+              </div>
+              <ul className="rp-signals">
+                {signals.map((s) => (
+                  <li key={s.key} className={`rp-signal is-${s.light}`}>
+                    <span className="rp-signal-light" aria-hidden="true" />
+                    <span className="rp-signal-label">{s.label}</span>
+                    <span className="rp-signal-dots" aria-hidden="true" />
+                    <span className="rp-signal-note">{s.note}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        );
+      })()}
 
       <StageConsole
         hello={hearth.hello}
@@ -2516,7 +2788,128 @@ function drawCharacter(
   // Emote + speech float further above the head.
   const inventoryOffset = c.inventory.length > 0 ? 13 : 0;
   if (c.emote) drawEmote(ctx, feetX, nameY - 14 - inventoryOffset, c.emote.kind, now);
-  if (c.speech) drawSpeech(ctx, feetX, nameY - 24 - inventoryOffset, c.speech.text);
+  if (c.speech) {
+    const bubbleY = nameY - 24 - inventoryOffset;
+    const kind = c.speech.kind ?? "say";
+    if (kind === "do") drawActionBubble(ctx, feetX, bubbleY, c.speech.text);
+    else if (kind === "think") drawThinkBubble(ctx, feetX, bubbleY, now);
+    else drawSpeech(ctx, feetX, bubbleY, c.speech.text);
+  }
+}
+
+// Bronze action caption. Signals a "do" — what the character is physically
+// doing, as italicized stage direction. Distinct from the gold "say" bubble
+// so the two kinds of log lines read differently on the canvas.
+function drawActionBubble(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  text: string,
+) {
+  const trim = text.length > 60 ? text.slice(0, 58) + "…" : text;
+  ctx.font = "italic 10px ui-monospace, SF Mono, monospace";
+  const metrics = ctx.measureText(trim);
+  const innerW = Math.ceil(metrics.width) + 12;
+  const innerH = 14;
+  const w = innerW + 4;
+  const h = innerH + 4;
+  const x = Math.max(4, Math.min(ctx.canvas.width - w - 4, cx - w / 2));
+  const y = Math.max(4, cy - h);
+  ctx.fillStyle = "#7a4f2a";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = "#1a1409";
+  ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = "rgba(214, 122, 74, 0.18)";
+  ctx.fillRect(x + 2, y + 2, innerW, innerH);
+  ctx.fillStyle = "#d67a4a";
+  ctx.textBaseline = "top";
+  ctx.fillText(trim, x + 7, y + 4);
+  ctx.fillStyle = "#7a4f2a";
+  ctx.fillRect(cx - 2, y + h, 4, 1);
+  ctx.fillRect(cx - 1, y + h + 1, 2, 1);
+}
+
+// Dashed thought cloud with a trailing dot tail. Shown while an agent is
+// mid-stream so observers can see "they're thinking" on the canvas itself,
+// not just in the cast panel.
+function drawThinkBubble(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  now: number,
+) {
+  const phase = Math.floor(now / 220) % 3;
+  const dots = phase === 0 ? "·  " : phase === 1 ? "· · " : "· · ·";
+  ctx.font = "10px ui-monospace, SF Mono, monospace";
+  const innerW = 26;
+  const innerH = 14;
+  const w = innerW + 4;
+  const h = innerH + 4;
+  const x = Math.max(4, Math.min(ctx.canvas.width - w - 4, cx - w / 2));
+  const y = Math.max(4, cy - h);
+  ctx.fillStyle = "rgba(20,24,31,0.88)";
+  ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.save();
+  ctx.strokeStyle = "#6a5a48";
+  ctx.setLineDash([2, 2]);
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.restore();
+  ctx.fillStyle = "#9ca3af";
+  ctx.textBaseline = "top";
+  ctx.textAlign = "center";
+  ctx.fillText(dots, x + w / 2, y + 4);
+  ctx.textAlign = "start";
+  ctx.fillStyle = "#6a5a48";
+  ctx.fillRect(cx - 1, y + h + 1, 2, 2);
+  ctx.fillRect(cx - 2, y + h + 5, 3, 3);
+}
+
+// Top-of-canvas director/narrator banner. Director moments don't belong on
+// any one agent (the director has no body), so they get their own strip.
+function drawDirectorBeat(
+  ctx: CanvasRenderingContext2D,
+  beat: { text: string; kind: string; reason: string; until: number } | null,
+  now: number,
+  cssW: number,
+) {
+  if (!beat) return;
+  if (beat.until <= now) return;
+  const maxW = Math.min(520, cssW - 32);
+  ctx.font = "12px ui-monospace, SF Mono, monospace";
+  ctx.textBaseline = "top";
+  const lines = wrapText(ctx, beat.text, maxW - 24);
+  const lineH = 16;
+  const padX = 12;
+  const padY = 10;
+  const labelH = 14;
+  const w = maxW;
+  const h = padY * 2 + labelH + lines.length * lineH;
+  const x = Math.floor((cssW - w) / 2);
+  const y = 58;
+  // Fade the last second so it doesn't vanish abruptly.
+  const remain = beat.until - now;
+  const alpha = remain < 1000 ? Math.max(0, remain) / 1000 : 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "#e8c86a";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = "#12100a";
+  ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = "rgba(232,200,106,0.07)";
+  ctx.fillRect(x + 2, y + 2, w - 4, h - 4);
+  ctx.fillStyle = "#c89a3a";
+  ctx.font = "bold 10px ui-monospace, SF Mono, monospace";
+  ctx.fillText(
+    `THE DIRECTOR · ${beat.kind.toUpperCase()}`,
+    x + padX,
+    y + padY,
+  );
+  ctx.fillStyle = "#f5f0e8";
+  ctx.font = "12px ui-monospace, SF Mono, monospace";
+  lines.forEach((line, i) => {
+    ctx.fillText(line, x + padX, y + padY + labelH + i * lineH);
+  });
+  ctx.restore();
 }
 
 function drawSpeech(ctx: CanvasRenderingContext2D, cx: number, cy: number, text: string) {

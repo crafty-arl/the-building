@@ -45,12 +45,13 @@ export async function validateSession(): Promise<boolean> {
   try {
     const resp = await fetch(`${API_BASE}/api/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(2000),
     });
     if (resp.ok) return true;
     clearSession();
     return false;
   } catch {
-    return true; // assume valid if offline
+    return true; // assume valid if offline / slow
   }
 }
 

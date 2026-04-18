@@ -135,6 +135,102 @@ export function StageConsole(props: Props) {
   // Ribbon mode only matters in-play. Default to "scene".
   const [mode, setMode] = useState<ConsoleMode>("scene");
 
+  // Dock collapse — drag the grabber down to reveal the canvas underneath.
+  const consoleRef = useRef<HTMLDivElement | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
+  const [dragOffset, setDragOffset] = useState<number | null>(null);
+
+  // Pop the dock back up whenever a new game launches: if the player
+  // collapsed it in the menu or on a prior floor, a fresh run should
+  // start with the console visible.
+  useEffect(() => {
+    if (inPlay) setCollapsed(false);
+  }, [inPlay]);
+  const dragStartRef = useRef<
+    { y: number; baseline: number; height: number; moved: boolean } | null
+  >(null);
+  const GRABBER_PEEK = 40;
+
+  const onGrabberPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    const el = consoleRef.current;
+    if (!el) return;
+    const height = el.offsetHeight;
+    const baseline = collapsed ? Math.max(0, height - GRABBER_PEEK) : 0;
+    dragStartRef.current = { y: e.clientY, baseline, height, moved: false };
+    setDragOffset(baseline);
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const onGrabberPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const start = dragStartRef.current;
+    if (!start) return;
+    const delta = e.clientY - start.y;
+    if (Math.abs(delta) > 4) start.moved = true;
+    const maxOffset = Math.max(0, start.height - GRABBER_PEEK);
+    const next = Math.min(maxOffset, Math.max(0, start.baseline + delta));
+    setDragOffset(next);
+  };
+
+  const onGrabberPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const start = dragStartRef.current;
+    if (!start) {
+      setDragOffset(null);
+      return;
+    }
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {}
+    // Asymmetric commit:
+    //  • Collapsed → open: any release opens. The dock is tall and dragging
+    //    it all the way up is physically tedious, so we don't gate on drag
+    //    distance. Tap or nudge — either one brings it back.
+    //  • Open → collapse: require real intent (past halfway or a clear
+    //    downward flick) so accidental touches don't close the dock.
+    if (collapsed) {
+      setCollapsed(false);
+    } else if (!start.moved) {
+      setCollapsed(true);
+    } else {
+      const maxOffset = Math.max(1, start.height - GRABBER_PEEK);
+      const delta = e.clientY - start.y;
+      const finalOffset = Math.min(
+        maxOffset,
+        Math.max(0, start.baseline + delta),
+      );
+      const FLICK = 36;
+      const close = finalOffset > maxOffset / 2 || delta > FLICK;
+      setCollapsed(close);
+    }
+    dragStartRef.current = null;
+    setDragOffset(null);
+  };
+
+  const dragStyle =
+    dragOffset !== null
+      ? {
+          transform: `translateY(${dragOffset}px)`,
+          transition: "none" as const,
+        }
+      : undefined;
+
+  const collapsedClass = collapsed ? " is-collapsed" : "";
+
+  const grabber = (
+    <button
+      type="button"
+      className="rp-console-grabber"
+      onPointerDown={onGrabberPointerDown}
+      onPointerMove={onGrabberPointerMove}
+      onPointerUp={onGrabberPointerUp}
+      onPointerCancel={onGrabberPointerUp}
+      aria-label={collapsed ? "Expand dock" : "Collapse dock"}
+      aria-expanded={!collapsed}
+    >
+      <span className="rp-console-grabber-bar" aria-hidden />
+    </button>
+  );
+
   // Clock tick for "relative time" displays.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -233,7 +329,14 @@ export function StageConsole(props: Props) {
   // menu surface — profile / season / settings / building.
   if (!inPlay) {
     return (
-      <div className="rp-console is-building" role="region" aria-label="Menu">
+      <div
+        ref={consoleRef}
+        className={`rp-console is-building${collapsedClass}`}
+        role="region"
+        aria-label="Menu"
+        style={dragStyle}
+      >
+        {grabber}
         <BuildingPane
           activeSheet={activeSheet}
           setActiveSheet={setActiveSheet}
@@ -246,10 +349,13 @@ export function StageConsole(props: Props) {
 
   return (
     <div
-      className={`rp-console ${modeClass}`}
+      ref={consoleRef}
+      className={`rp-console ${modeClass}${collapsedClass}`}
       role="region"
       aria-label="Stage console"
+      style={dragStyle}
     >
+      {grabber}
       {/* ── Mode ribbon ─────────────────────────────────────────── */}
       <div className="rp-console-ribbon" role="tablist" aria-label="Dock mode">
         {MODE_DEFS.map((m) => {
