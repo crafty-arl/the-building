@@ -10,9 +10,12 @@ import type {
   RunClock,
   SceneAgentAction,
   SceneWire,
+  StoryBible,
+  StoryState,
 } from "../../../app/shared/protocol";
 import { getUserId } from "./auth";
 import { currentRoomId, loadRoomById } from "./engine";
+import { BUS_EVENTS, bus } from "../phaser/bus";
 
 export type HearthStatus = "idle" | "connecting" | "open" | "closed" | "error";
 
@@ -40,6 +43,8 @@ export interface HearthHello {
   roomId: string;
   scene: SceneWire;
   dailyPlan: DailyPlan;
+  storyBible: StoryBible;
+  storyState: StoryState;
   clock: RunClock;
   dayComplete?: boolean;
   role: PeerRole;
@@ -88,12 +93,19 @@ export interface UseHearthResult {
   missedEvents: MissedEvent[];
   /** Dismiss the missed-events overlay locally. */
   clearMissedEvents: () => void;
+  /** The day's 3-act bible (null until hello arrives). */
+  storyBible: StoryBible | null;
+  /** Which act is live right now (null until hello arrives). */
+  storyState: StoryState | null;
   /** Call to send a card-play frame; returns false if the socket isn't open. */
   playCard: (cardId: string) => boolean;
   /** Owner-only: set room difficulty. Returns false if socket isn't open. */
   setDifficulty: (difficulty: Difficulty) => boolean;
   /** Owner-only: rotate the invite token. Returns false if socket isn't open. */
   rotateInvite: () => boolean;
+  /** Owner-only: steer the scene with a "what happens next?" directive.
+   *  Returns false if socket isn't open or text is empty. */
+  sendDirective: (text: string) => boolean;
 }
 
 const WS_BASE =
@@ -115,6 +127,8 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
   const [inviteToken, setInviteToken] = useState<string>("");
   const [difficulty, setDifficultyState] = useState<Difficulty>("resident");
   const [missedEvents, setMissedEvents] = useState<MissedEvent[]>([]);
+  const [storyBible, setStoryBible] = useState<StoryBible | null>(null);
+  const [storyState, setStoryState] = useState<StoryState | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -210,6 +224,8 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
           setPeers(Array.isArray(h.peers) ? h.peers : []);
           setHealth(h.health ?? null);
           setInviteToken(typeof h.inviteToken === "string" ? h.inviteToken : "");
+          setStoryBible(h.storyBible ?? null);
+          setStoryState(h.storyState ?? null);
           if (
             h.difficulty === "tourist" ||
             h.difficulty === "resident" ||
@@ -246,6 +262,20 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
         if (msg.type === "invite-rotated") {
           const t = (msg as { inviteToken?: string }).inviteToken;
           if (typeof t === "string") setInviteToken(t);
+          return;
+        }
+        if (msg.type === "story-advanced") {
+          const s = (msg as { storyState?: StoryState }).storyState;
+          if (s) {
+            setStoryState(s);
+            bus.emit(BUS_EVENTS.storyAdvanced, s);
+          }
+          return;
+        }
+        if (msg.type === "directive-accepted") {
+          const text = typeof msg.text === "string" ? msg.text : "";
+          const at = typeof msg.at === "number" ? msg.at : Date.now();
+          bus.emit(BUS_EVENTS.directiveAccepted, { text, at });
           return;
         }
         if (msg.type === "npc-spawned") {
@@ -287,6 +317,7 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
           const agentId = String(msg.agentId ?? "");
           const delta = String(msg.delta ?? "");
           if (!agentId) return;
+          bus.emit(BUS_EVENTS.agentThinking, { agentId, delta });
           setAgents((prev) => {
             const cur = prev[agentId] ?? newAgent(agentId);
             return {
@@ -307,6 +338,11 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
           const reason = typeof msg.reason === "string" ? msg.reason : "";
           const nextWakeAt =
             typeof msg.nextWakeAt === "number" ? msg.nextWakeAt : null;
+          bus.emit(BUS_EVENTS.agentDecided, {
+            agentId,
+            action,
+            nextWakeAt: nextWakeAt ?? 0,
+          });
           setAgents((prev) => {
             const cur = prev[agentId] ?? newAgent(agentId);
             return {
@@ -389,6 +425,19 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
     }
   };
 
+  const sendDirective = (text: string): boolean => {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify({ type: "player-directive", text: trimmed }));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const clearMissedEvents = () => setMissedEvents([]);
 
   return {
@@ -405,9 +454,12 @@ export function useHearth(opts: { enabled: boolean; inviteToken?: string | null 
     difficulty,
     missedEvents,
     clearMissedEvents,
+    storyBible,
+    storyState,
     playCard,
     setDifficulty,
     rotateInvite,
+    sendDirective,
   };
 }
 

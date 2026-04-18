@@ -19,7 +19,6 @@ import {
   simHour,
   SCENES,
   applyScene,
-  fetchDirective,
   loadState,
   saveState,
   clearSaved,
@@ -63,12 +62,10 @@ import { pushBuilding, pushRoom, pullAll, enqueuePush, getDeviceId, releaseLock 
 import { clearSession, getUserId } from "./auth";
 import { useHearth, slugify, stripNpcPrefix } from "./useHearth";
 import { StageConsole } from "./StageConsole";
-import {
-  characterFromNpc,
-  charactersFromHello,
-  npcCharId,
-  sceneFromHello,
-} from "./hearth-projection";
+import { MapView } from "../phaser/MapView";
+import { DirectorNarration } from "../phaser/DirectorNarration";
+import { ThinkingTicker } from "../phaser/ThinkingTicker";
+import { ActBanner } from "../phaser/ActBanner";
 import type { PullResult } from "./sync";
 import {
   INGREDIENTS,
@@ -506,7 +503,6 @@ export function RPG() {
       };
       live.roomContext = prompt;
       stateRef.current = live;
-      projectedSceneIdRef.current = null;
       bld.activeRoomId = live.roomId;
       bld.lastPlayedAt = Date.now();
       ensureProgressState(bld);
@@ -538,24 +534,12 @@ export function RPG() {
   };
 
 
-  const onSubmitDirective = async () => {
+  const onSubmitDirective = () => {
     const text = directive.trim();
     if (!text) return;
-    if (stateRef.current.tension >= 100) return;
-    setNarratorThinking(true);
-    setLlmFallbackReason(null);
-    try {
-      const plan = await fetchDirective(stateRef.current, text);
-      const live = stateRef.current;
-      if (plan) live.planQueue.push(plan);
-      live.roomContext = `${live.roomContext} → ${text}`;
-      setDirective("");
-    } catch (e) {
-      setLlmFallbackReason(e instanceof Error ? e.message : String(e));
-    } finally {
-      setNarratorThinking(false);
-      setState({ ...stateRef.current });
-    }
+    const sent = hearth.sendDirective(text);
+    if (!sent) return;
+    setDirective("");
   };
 
   const pending = state.pending;
@@ -668,42 +652,10 @@ export function RPG() {
     inviteToken: urlInviteToken,
   });
 
-  // Project Hearth's hello into engine state. The hello carries the room's
-  // tilemap, anchors, palette, and the day's NPC roster — Hearth is the
-  // source of truth for all of it. Each unique scene id only projects once
-  // per session so re-renders don't reset character positions / motion.
-  const projectedSceneIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    const hello = hearth.hello;
-    if (!hello) return;
-    const wireSceneId = hello.scene?.id ?? null;
-    if (!wireSceneId) return;
-    if (projectedSceneIdRef.current === wireSceneId) return;
-    if (!hello.scene.tilemap || hello.scene.tilemap.length === 0) return;
-    const scene = sceneFromHello(hello);
-    const characters = charactersFromHello(hello, scene);
-    const live = stateRef.current;
-    applyScene(live, scene);
-    if (characters.length > 0) live.characters = characters;
-    projectedSceneIdRef.current = wireSceneId;
-    setState({ ...live });
-  }, [hearth.hello]);
-
-  // Mid-day spawns: incrementally append a Character for each newly
-  // arrived NPC without resetting existing characters' motion state.
-  useEffect(() => {
-    if (hearth.spawnedNpcs.length === 0) return;
-    const live = stateRef.current;
-    if (!live.scene) return;
-    let added = false;
-    for (const ev of hearth.spawnedNpcs) {
-      const id = npcCharId(ev.npc.name);
-      if (live.characters.some((c) => c.id === id)) continue;
-      live.characters = [...live.characters, characterFromNpc(ev.npc, live.scene)];
-      added = true;
-    }
-    if (added) setState({ ...live });
-  }, [hearth.spawnedNpcs]);
+  // Phaser v1 slice: the room's geometry arrives via SceneWire.rooms and is
+  // rendered directly by <MapView>. Engine-side Scene projection has been
+  // retired; engine state stays around for dialog authoring / storage but
+  // no longer ingests wire tilemaps.
 
   const viewNode: React.ReactNode = (() => {
   if (state.phase === "setup") {
@@ -1262,7 +1214,26 @@ export function RPG() {
             className={`rp-canvas ${state.pending ? "is-skippable" : ""}`}
             onClick={state.pending ? onSkipLine : undefined}
             title={state.pending ? "Click to skip this line" : undefined}
+            style={{ display: "none" }}
           />
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              pointerEvents: "none",
+            }}
+          >
+            <MapView
+              scene={hearth.hello?.scene ?? null}
+              npcs={hearth.hello?.dailyPlan?.npcs ?? []}
+            />
+          </div>
+          <ActBanner
+            storyBible={hearth.storyBible}
+            storyState={hearth.storyState}
+          />
+          <DirectorNarration />
+          <ThinkingTicker />
           <div className="rp-hud-top" aria-hidden={false}>
             <div className="rp-top-center">
               <h1 className="rp-floor-title">FLOOR {state.floorIndex >= 0 ? state.floorIndex + 1 : ""}</h1>

@@ -19,6 +19,7 @@
 import { stream as piStream } from "@mariozechner/pi-ai";
 import { kimi, STORYTELLERS, type StorytellerArchetype } from "@augur/agent";
 import type { DailyPlan, Difficulty } from "../../shared/protocol.ts";
+import type { StoryBible, StoryState } from "../../shared/protocol.ts";
 import { balanceJson } from "./ai-util.ts";
 import {
   registerAgentKind,
@@ -43,7 +44,7 @@ const DEFAULT_ARCHETYPE_ID: keyof typeof STORYTELLERS = "weaver";
 const MIN_CADENCE_SEC = 5;
 const MAX_CADENCE_SEC = 600;
 const DEFAULT_CADENCE_SEC = 60;
-const MAX_TOKENS = 2000;
+const MAX_TOKENS = 8000;
 const RECENT_EVENTS_WINDOW = 14;
 
 const ACTION_TYPES = new Set([
@@ -51,27 +52,33 @@ const ACTION_TYPES = new Set([
   "revelation",
   "pace-shift",
   "force-beat",
+  "advance-act",
 ]);
 
 function buildDirectorSystem(
   archetype: StorytellerArchetype,
   roomPrompt: string,
   difficulty: Difficulty,
+  storyBible: StoryBible | null,
+  storyState: StoryState | null,
 ): string {
   const roomLine =
     roomPrompt && roomPrompt.trim()
       ? `Room premise: ${roomPrompt.trim()}`
       : `Room premise: a small inn at the edge of the kingdom.`;
   const difficultyLine = directorDifficultyHint(difficulty);
+  const actBlock = buildActBlock(storyBible, storyState);
   return [
     `You are ${archetype.name.toUpperCase()}, the DIRECTOR of a live persistent scene.`,
     `Your domain: ${archetype.domain}.`,
     `Your temperament: ${archetype.temperament}`,
     `Your pacing rule: ${archetype.pacingRule}`,
     ``,
+    actBlock,
+    ``,
     `Difficulty dial (affects YOUR choices, not the infrastructure): ${difficultyLine}`,
     ``,
-    `You are NOT an NPC. You do not inhabit a body. You do not speak aloud to the characters. Your only power is to decide whether the scene needs a beat right now — a complication, a revelation, a pace-shift, or a force-beat toward the exit — and to name it. Observers see your reasoning stream in real time; the characters do not.`,
+    `You are NOT an NPC. You do not inhabit a body. You do not speak aloud to the characters. Your only power is to decide whether the scene needs a beat right now — a complication, a revelation, a pace-shift, a force-beat toward the exit, or (rarely) advance-act when this act's exit condition has landed. Observers see your reasoning stream in real time; the characters do not.`,
     ``,
     `You must NEVER introduce new named characters the scene hasn't seen. NPCs spawn themselves.`,
     ``,
@@ -79,7 +86,8 @@ function buildDirectorSystem(
     ``,
     `Each wake you decide three things in order:`,
     `1. WHAT (if anything) happens. null is the right answer most of the time — scenes breathe. Only fire when the moment truly needs it.`,
-    `2. The action type, one of: "complication", "revelation", "pace-shift", "force-beat".`,
+    `2. The action type, one of: "complication", "revelation", "pace-shift", "force-beat", "advance-act".`,
+    `   - Use "advance-act" ONLY when this act's exit condition has genuinely landed in the room. Text explains what tipped it. Do NOT fire advance-act proactively or on a timer — the room auto-advances if the act drags.`,
     `3. WHEN to wake next. You own this. Use the event bus to judge urgency.`,
     ``,
     `Cadence guidance (seconds, range 5–600):`,
@@ -91,9 +99,43 @@ function buildDirectorSystem(
     `Voice rule: write so a 5th-grader understands. Plain words. Concrete images. Short sentences.`,
     ``,
     `Think out loud briefly (1–3 short sentences), then on the final line return STRICT JSON:`,
-    `{"action": null OR {"type": "complication"|"revelation"|"pace-shift"|"force-beat", "text": "<1–2 sentence beat in the scene's occult-folk register>"}, "nextWakeInSeconds": <integer>, "reason": "<one sentence explaining your choice>"}`,
+    `{"action": null OR {"type": "complication"|"revelation"|"pace-shift"|"force-beat"|"advance-act", "text": "<1–2 sentence beat>"}, "nextWakeInSeconds": <integer>, "reason": "<one sentence explaining your choice>"}`,
     ``,
     `Do not wrap the JSON in code fences. Do not write anything after the JSON line.`,
+  ].join("\n");
+}
+
+/**
+ * Format the current act as a guardrail the director (and NPCs) reason
+ * inside of. Returns an empty-ish line when no bible exists yet so older
+ * DO state still works.
+ */
+function buildActBlock(
+  storyBible: StoryBible | null,
+  storyState: StoryState | null,
+): string {
+  if (!storyBible || !storyState) {
+    return `Story bible: (not yet authored — improvise freely within the room's premise.)`;
+  }
+  const idx = Math.max(
+    0,
+    Math.min(storyState.currentActIndex, storyBible.acts.length - 1),
+  );
+  const act = storyBible.acts[idx];
+  if (!act) return `Story bible: (act index out of range.)`;
+  const beats = act.beats.map((b) => `  · ${b}`).join("\n");
+  return [
+    `Story bible (day-long 3-act arc):`,
+    `  Logline: ${storyBible.logline}`,
+    `  Theme: ${storyBible.theme}`,
+    ``,
+    `YOU ARE INSIDE ${act.name.toUpperCase()} (act ${idx + 1} of ${storyBible.acts.length}).`,
+    `Premise: ${act.premise}`,
+    `Pressure: ${act.pressure}`,
+    `Beats we want to see land inside this act:\n${beats}`,
+    `Exit condition (advance the act when THIS is true in the room): ${act.exit}`,
+    ``,
+    `Every decision you make must serve this act's pressure or push toward its exit. Do not leap ahead to later acts; do not stall in earlier ones.`,
   ].join("\n");
 }
 
@@ -139,7 +181,7 @@ function buildDirectorUser(opts: {
 
 const directorImpl: SceneAgentImpl = {
   kind: DIRECTOR_KIND,
-  async think({ now, agent, env, emit, recentEvents, dailyPlan, clock, roomPrompt, difficulty }) {
+  async think({ now, agent, env, emit, recentEvents, dailyPlan, clock, roomPrompt, difficulty, storyBible, storyState }) {
     if (!dailyPlan || !clock) {
       return {
         action: null,
@@ -152,7 +194,13 @@ const directorImpl: SceneAgentImpl = {
       DEFAULT_ARCHETYPE_ID;
     const archetype = STORYTELLERS[archetypeId] ?? STORYTELLERS.weaver;
     const sinceLastPlayerInputMs = lastPlayerInputAge(recentEvents, now);
-    const systemPrompt = buildDirectorSystem(archetype, roomPrompt, difficulty);
+    const systemPrompt = buildDirectorSystem(
+      archetype,
+      roomPrompt,
+      difficulty,
+      storyBible,
+      storyState,
+    );
     const userPrompt = buildDirectorUser({
       plan: dailyPlan,
       gameHour: clock.gameHour,
@@ -166,7 +214,7 @@ const directorImpl: SceneAgentImpl = {
       systemPrompt,
       userPrompt,
       sessionId: agent.id,
-      onDelta: (delta) => {
+      onReason: (delta) => {
         tokenCount++;
         emit({ type: "agent-thinking", delta });
       },
@@ -198,7 +246,7 @@ interface StreamDirectorOpts {
   systemPrompt: string;
   userPrompt: string;
   sessionId: string;
-  onDelta: (delta: string) => void;
+  onReason?: (delta: string) => void;
 }
 
 async function streamDirector(opts: StreamDirectorOpts): Promise<string> {
@@ -233,7 +281,10 @@ async function streamDirector(opts: StreamDirectorOpts): Promise<string> {
         const delta = (ev as { delta?: string }).delta ?? "";
         if (!delta) continue;
         buffer += delta;
-        opts.onDelta(delta);
+      } else if (t === "thinking_delta") {
+        const delta = (ev as { delta?: string }).delta ?? "";
+        if (!delta) continue;
+        opts.onReason?.(delta);
       } else if (t === "error") {
         console.error(
           `[director pi-ai stream error] sessionId=${opts.sessionId}`,

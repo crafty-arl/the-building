@@ -22,6 +22,8 @@ import type {
   PeerRole,
   RunClock,
   ServerMessage,
+  StoryBible,
+  StoryState,
 } from "../../shared/protocol.ts";
 import { computeHand } from "./hand.ts";
 import { buildScene, TAVERN } from "./scene.ts";
@@ -37,7 +39,11 @@ import {
 } from "./tree.ts";
 import { entryToWire, sceneToWire, treeToWire } from "./wire.ts";
 import { slotForHour, todayUtc } from "./daily-plan.ts";
-import { generateRoomPlan, type RoomPlan } from "./room-plan.ts";
+import {
+  floorAnchorList,
+  generateFloorPlan,
+  type FloorPlan,
+} from "./floor-plan.ts";
 import { parseAiResponse } from "./ai-util.ts";
 import {
   type SceneAgentState,
@@ -58,6 +64,7 @@ import {
   DIRECTOR_AGENT_ID,
   seedDirectorAgent,
 } from "./director-agent.ts";
+import { generateStoryBible } from "./story-bible.ts";
 
 export interface HearthEnv {
   HEARTH: DurableObjectNamespace;
@@ -81,6 +88,14 @@ const STORAGE_DIFFICULTY = "difficulty";
 const STORAGE_LAST_INPUT_AT = "lastInputAt";
 const STORAGE_LAST_ALARM_AT = "lastAlarmAt";
 const STORAGE_PLAN_GENERATED_AT = "planGeneratedAt";
+const STORAGE_STORY_BIBLE = "storyBible";
+const STORAGE_STORY_STATE = "storyState";
+/**
+ * If the current act hasn't been advanced after this many game hours the
+ * room force-advances on the next alarm. Keeps acts from getting stuck
+ * when no organic exit condition lands.
+ */
+const ACT_MAX_GAME_HOURS = 6;
 const SPAWN_CAP_PER_DAY = 2;
 const INITIAL_FOOTSTEPS = 8;
 const HOURS_PER_RUN = 2;
@@ -116,13 +131,15 @@ export class Hearth implements DurableObject {
   private roomPrompt = "";
   private inheritedMemory = "";
   private anchors: string[] = [];
-  private dailyPlan: RoomPlan | null = null;
+  private dailyPlan: FloorPlan | null = null;
   private clock: RunClock | null = null;
   private inviteToken = "";
   private difficulty: Difficulty = DEFAULT_DIFFICULTY;
   private lastInputAt: number | null = null;
   private lastAlarmAt: number | null = null;
   private planGeneratedAt: number | null = null;
+  private storyBible: StoryBible | null = null;
+  private storyState: StoryState | null = null;
   private loaded: Promise<void>;
 
   constructor(state: DurableObjectState, env: HearthEnv) {
@@ -151,7 +168,7 @@ export class Hearth implements DurableObject {
     this.anchors =
       (await this.state.storage.get<string[]>(STORAGE_ANCHORS)) ?? [];
     this.dailyPlan =
-      (await this.state.storage.get<RoomPlan>(STORAGE_DAILY_PLAN)) ?? null;
+      (await this.state.storage.get<FloorPlan>(STORAGE_DAILY_PLAN)) ?? null;
     this.clock =
       (await this.state.storage.get<RunClock>(STORAGE_CLOCK)) ?? null;
     this.inviteToken =
@@ -166,6 +183,10 @@ export class Hearth implements DurableObject {
     this.planGeneratedAt =
       (await this.state.storage.get<number>(STORAGE_PLAN_GENERATED_AT)) ??
       null;
+    this.storyBible =
+      (await this.state.storage.get<StoryBible>(STORAGE_STORY_BIBLE)) ?? null;
+    this.storyState =
+      (await this.state.storage.get<StoryState>(STORAGE_STORY_STATE)) ?? null;
   }
 
   private async persist(): Promise<void> {
@@ -198,6 +219,12 @@ export class Hearth implements DurableObject {
         STORAGE_PLAN_GENERATED_AT,
         this.planGeneratedAt,
       );
+    }
+    if (this.storyBible) {
+      await this.state.storage.put(STORAGE_STORY_BIBLE, this.storyBible);
+    }
+    if (this.storyState) {
+      await this.state.storage.put(STORAGE_STORY_STATE, this.storyState);
     }
   }
 
@@ -232,6 +259,77 @@ export class Hearth implements DurableObject {
     // Phase 1 will hook the alarm dispatcher in here.
     if (url.pathname === "/wake") {
       await this.ensureDailyPlan();
+      return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/debug/tick") {
+      // Fire the alarm handler immediately. Useful for demoing the
+      // autonomous agent loop without waiting for self-chosen nextWakeAt
+      // values (NPCs often pick 10–30 min gaps).
+      await this.ensureDailyPlan();
+      await this.alarm();
+      return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/debug/tick-all") {
+      // Force every registered agent to be due now, then dispatch. Produces
+      // a burst of agent-decided frames so the full scene comes alive in
+      // one HTTP call — for demos only.
+      await this.ensureDailyPlan();
+      const now = Date.now();
+      const agents =
+        (await this.state.storage.get<Record<string, SceneAgentState>>(
+          STORAGE_AGENTS,
+        )) ?? {};
+      for (const a of Object.values(agents)) a.nextWakeAt = now - 1;
+      await this.state.storage.put(STORAGE_AGENTS, agents);
+      await this.alarm();
+      return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/debug/state") {
+      const agents =
+        (await this.state.storage.get<Record<string, SceneAgentState>>(
+          STORAGE_AGENTS,
+        )) ?? {};
+      const now = Date.now();
+      const body = {
+        now: new Date(now).toISOString(),
+        hasPlan: !!this.dailyPlan,
+        npcs: this.dailyPlan?.npcs.map((n) => n.name) ?? [],
+        agents: Object.entries(agents).map(([id, a]) => ({
+          id,
+          nextWakeInSec: Math.round((a.nextWakeAt - now) / 1000),
+        })),
+        nextAlarmAt: (await this.state.storage.getAlarm()) ?? null,
+      };
+      return Response.json(body);
+    }
+
+    if (url.pathname === "/debug/force-move") {
+      const body = (await req.json().catch(() => ({}))) as {
+        agentId?: string;
+        anchor?: string;
+        text?: string;
+        type?: string;
+      };
+      const agentId = String(body.agentId ?? "");
+      const anchor = String(body.anchor ?? "");
+      if (!agentId || !anchor) {
+        return new Response("need agentId + anchor", { status: 400 });
+      }
+      const kind = body.type === "say" || body.type === "do" ? body.type : "move";
+      this.broadcast({
+        type: "agent-decided",
+        agentId,
+        action: {
+          type: kind,
+          text: body.text,
+          position: anchor,
+        },
+        nextWakeAt: Date.now() + 30_000,
+        reason: "debug/force-move",
+      });
       return new Response(null, { status: 204 });
     }
 
@@ -342,7 +440,7 @@ export class Hearth implements DurableObject {
     const today = todayUtc();
 
     if (!this.dailyPlan || this.dailyPlan.date !== today) {
-      this.dailyPlan = await generateRoomPlan(
+      this.dailyPlan = await generateFloorPlan(
         this.env,
         today,
         this.roomPrompt,
@@ -351,7 +449,17 @@ export class Hearth implements DurableObject {
       this.planGeneratedAt = Date.now();
       // The plan now owns the anchor list — keep STORAGE_ANCHORS in sync so
       // re-connects with the same room don't blow it away with a stale param.
-      this.anchors = Object.keys(this.dailyPlan.anchors);
+      this.anchors = floorAnchorList(this.dailyPlan);
+      this.storyBible = await generateStoryBible(
+        this.env,
+        this.dailyPlan,
+        this.roomPrompt,
+        this.anchors,
+      );
+      this.storyState = {
+        currentActIndex: 0,
+        actStartedAtGameHour: this.dailyPlan.openingHour,
+      };
       this.tree = new SessionTree();
       this.footsteps = INITIAL_FOOTSTEPS;
       this.clock = {
@@ -417,7 +525,7 @@ export class Hearth implements DurableObject {
     if (!this.tree) this.tree = new SessionTree();
     const today = todayUtc();
     if (!this.dailyPlan || this.dailyPlan.date !== today) {
-      this.dailyPlan = await generateRoomPlan(
+      this.dailyPlan = await generateFloorPlan(
         this.env,
         today,
         this.roomPrompt,
@@ -426,7 +534,17 @@ export class Hearth implements DurableObject {
       this.planGeneratedAt = Date.now();
       // The plan now owns the anchor list — keep STORAGE_ANCHORS in sync so
       // re-connects with the same room don't blow it away with a stale param.
-      this.anchors = Object.keys(this.dailyPlan.anchors);
+      this.anchors = floorAnchorList(this.dailyPlan);
+      this.storyBible = await generateStoryBible(
+        this.env,
+        this.dailyPlan,
+        this.roomPrompt,
+        this.anchors,
+      );
+      this.storyState = {
+        currentActIndex: 0,
+        actStartedAtGameHour: this.dailyPlan.openingHour,
+      };
       this.tree = new SessionTree();
       this.footsteps = INITIAL_FOOTSTEPS;
       this.clock = {
@@ -499,6 +617,7 @@ export class Hearth implements DurableObject {
         await this.state.storage.put(STORAGE_AGENTS, agents);
       }
     }
+    this.maybeAutoAdvanceAct();
     const next = await dispatchDueAgents({
       now,
       storage: this.state.storage,
@@ -509,8 +628,11 @@ export class Hearth implements DurableObject {
       anchors: this.anchors,
       roomPrompt: this.roomPrompt,
       difficulty: this.difficulty,
+      storyBible: this.storyBible,
+      storyState: this.storyState,
       onSpawn: (spawnerId, action, spawnNow) =>
         this.handleSpawn(spawnerId, action, spawnNow),
+      onAdvanceAct: (reason) => this.advanceAct(reason),
     });
     if (next === null) {
       console.log("[hearth] no agents registered; alarm not re-armed");
@@ -519,6 +641,50 @@ export class Hearth implements DurableObject {
     await this.state.storage.setAlarm(next);
     const deltaSec = Math.max(0, Math.round((next - now) / 1000));
     console.log(`[scene-agents] re-armed for +${deltaSec}s`);
+  }
+
+  /**
+   * Advance the current act, if possible. Broadcasts `story-advanced` and
+   * persists the new state. Returns true if we actually moved forward.
+   */
+  private async advanceAct(reason: string): Promise<boolean> {
+    if (!this.storyBible || !this.storyState || !this.clock) return false;
+    if (this.storyState.currentActIndex >= this.storyBible.acts.length - 1) {
+      return false;
+    }
+    this.storyState = {
+      currentActIndex: this.storyState.currentActIndex + 1,
+      actStartedAtGameHour: this.clock.gameHour,
+      lastAdvanceReason: reason.slice(0, 200),
+    };
+    await this.state.storage.put(STORAGE_STORY_STATE, this.storyState);
+    this.broadcast({
+      type: "story-advanced",
+      storyState: this.storyState,
+    });
+    return true;
+  }
+
+  /**
+   * If the current act has been live for longer than ACT_MAX_GAME_HOURS
+   * game-hours and isn't already the final act, hard-advance it so the
+   * scene doesn't get stuck. Called from the alarm handler.
+   */
+  private maybeAutoAdvanceAct(): void {
+    if (!this.storyBible || !this.storyState || !this.clock) return;
+    if (this.storyState.currentActIndex >= this.storyBible.acts.length - 1) {
+      return;
+    }
+    const elapsed = this.clock.gameHour - this.storyState.actStartedAtGameHour;
+    if (elapsed < ACT_MAX_GAME_HOURS) return;
+    this.storyState = {
+      currentActIndex: this.storyState.currentActIndex + 1,
+      actStartedAtGameHour: this.clock.gameHour,
+      lastAdvanceReason: `auto-advance: act ran ${elapsed}h without exit`,
+    };
+    this.broadcast({ type: "story-advanced", storyState: this.storyState });
+    // persistence happens on the next full persist() pass; broadcast is
+    // what observers care about immediately.
   }
 
   /**
@@ -541,7 +707,7 @@ export class Hearth implements DurableObject {
       );
       return null;
     }
-    const validAnchors = Object.keys(this.dailyPlan.anchors ?? {});
+    const validAnchors = floorAnchorList(this.dailyPlan);
     const npc = parseSpawnPayload(action.text, validAnchors);
     if (!npc) {
       console.log(
@@ -598,6 +764,22 @@ export class Hearth implements DurableObject {
 
   private async sendHello(ws: WebSocket): Promise<void> {
     if (!this.tree || !this.dailyPlan || !this.clock) return;
+    // A DO loaded from storage before story-bible shipped may have a plan
+    // but no bible. Backfill it once so the ServerHello contract is honored.
+    if (!this.storyBible || !this.storyState) {
+      this.storyBible = await generateStoryBible(
+        this.env,
+        this.dailyPlan,
+        this.roomPrompt,
+        this.anchors,
+      );
+      this.storyState = {
+        currentActIndex: 0,
+        actStartedAtGameHour: this.clock.gameHour,
+      };
+      await this.state.storage.put(STORAGE_STORY_BIBLE, this.storyBible);
+      await this.state.storage.put(STORAGE_STORY_STATE, this.storyState);
+    }
     const attachment = ws.deserializeAttachment() as
       | SocketAttachment
       | undefined;
@@ -611,6 +793,8 @@ export class Hearth implements DurableObject {
       tree: treeToWire(this.tree),
       footsteps: this.footsteps,
       dailyPlan: this.dailyPlan,
+      storyBible: this.storyBible,
+      storyState: this.storyState,
       clock: this.clock,
       dayComplete: this.isDayComplete(),
       role: attachment?.role ?? "owner",
@@ -718,6 +902,19 @@ export class Hearth implements DurableObject {
       return;
     }
 
+    if (parsed.type === "player-directive") {
+      if (role !== "owner") {
+        safeSend(ws, {
+          type: "error",
+          message: "only the owner can steer the scene",
+          code: "observer-readonly",
+        });
+        return;
+      }
+      await this.handlePlayerDirective(ws, parsed.text);
+      return;
+    }
+
     safeSend(ws, { type: "error", message: `unknown message type: ${(parsed as any).type}` });
   }
 
@@ -755,6 +952,53 @@ export class Hearth implements DurableObject {
     this.inviteToken = crypto.randomUUID();
     await this.state.storage.put(STORAGE_INVITE, this.inviteToken);
     this.broadcast({ type: "invite-rotated", inviteToken: this.inviteToken });
+  }
+
+  /**
+   * Owner typed a "what happens next?" directive. Push it onto the event
+   * bus with a high-salience `player:directive` tag, poke every agent to
+   * wake within 2 seconds so they all see and react inside the current act,
+   * and ack the owner so their input echoes locally.
+   */
+  private async handlePlayerDirective(
+    ws: WebSocket,
+    raw: string,
+  ): Promise<void> {
+    const text = typeof raw === "string" ? raw.trim().slice(0, 400) : "";
+    if (!text) {
+      safeSend(ws, { type: "error", message: "directive was empty" });
+      return;
+    }
+    const now = Date.now();
+    const event: SceneEvent = {
+      at: now,
+      agentId: `player:${this.userId}:directive`,
+      reason: `player steers: "${text}"`,
+      action: null,
+    };
+    const bus =
+      (await this.state.storage.get<SceneEvent[]>(STORAGE_EVENT_BUS)) ?? [];
+    bus.push(event);
+    while (bus.length > 30) bus.shift();
+    await this.state.storage.put(STORAGE_EVENT_BUS, bus);
+
+    this.lastInputAt = now;
+    await this.state.storage.put(STORAGE_LAST_INPUT_AT, now);
+
+    // Wake everyone in 2s so the next dispatch ingests the directive
+    // before the agents' own self-chosen cadences would fire.
+    const agents =
+      (await this.state.storage.get<Record<string, SceneAgentState>>(
+        STORAGE_AGENTS,
+      )) ?? {};
+    const wakeAt = now + 2000;
+    for (const a of Object.values(agents)) {
+      if (a.nextWakeAt > wakeAt) a.nextWakeAt = wakeAt;
+    }
+    await this.state.storage.put(STORAGE_AGENTS, agents);
+    await this.state.storage.setAlarm(wakeAt);
+
+    safeSend(ws, { type: "directive-accepted", text, at: now });
   }
 
   private async handlePlay(ws: WebSocket, cardId: string): Promise<void> {

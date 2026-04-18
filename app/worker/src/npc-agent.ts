@@ -21,6 +21,8 @@ import type {
   Difficulty,
   NpcDay,
   RunClock,
+  StoryBible,
+  StoryState,
 } from "../../shared/protocol.ts";
 import { balanceJson } from "./ai-util.ts";
 import { slotForHour } from "./daily-plan.ts";
@@ -39,15 +41,16 @@ const NPC_SYSTEM_PREFIX = `You are a resident in a small room at the edge of a k
 
 You will be given:
 - The room you live in (its premise, what it IS)
+- The current act of the day's 3-act story and its pressure — the guardrail every decision must serve
 - Your own name, backstory, today's objective, and the private motive underneath
-- Your scheduled activity for this hour (a soft anchor, not a script)
+- Your scheduled activity for this hour — this is what you ARE doing now; deviate only when the recent moments give you a concrete reason
 - The recent moments others have noticed in the room
 - The current in-game hour
 - The named positions you may stand at in this room
 - Where you are right now, and where the others are
 
 You decide three things, in order:
-1. WHAT (if anything) you do or notice right now. null is a valid choice — sometimes the moment doesn't call for action.
+1. WHAT (if anything) you do or notice right now. null is a valid choice — sometimes the moment doesn't call for action. But if your scheduled activity is "sweeping" and nothing's happening, you ARE sweeping; the say/do action should reflect that, not invent a new activity.
 2. WHERE you end up after this beat. Choose one of the named positions in this room. If you don't move, repeat the spot you're already at.
 3. WHEN you'll think next. You own this. You are not on a clock.
 
@@ -74,6 +77,8 @@ function buildNpcSystem(
   anchors: string[],
   roomPrompt: string,
   difficulty: Difficulty,
+  storyBible: StoryBible | null,
+  storyState: StoryState | null,
 ): string {
   const anchorList = anchors.length > 0
     ? anchors.map((a) => `"${a}"`).join(", ")
@@ -81,12 +86,43 @@ function buildNpcSystem(
   const promptLine = roomPrompt && roomPrompt.trim()
     ? `Room premise: ${roomPrompt.trim()}`
     : `Room premise: a small inn at the edge of the kingdom.`;
+  const actBlock = buildNpcActBlock(storyBible, storyState);
   return [
     NPC_SYSTEM_PREFIX,
     "",
     promptLine,
+    "",
+    actBlock,
+    "",
     `Named positions in this room: ${anchorList}.`,
     `Tempo dial for the room: ${npcDifficultyHint(difficulty)}`,
+  ].join("\n");
+}
+
+/**
+ * NPC's view of the current act — same data as the director sees, but
+ * framed as a guardrail they improvise inside rather than a beat sheet
+ * they execute. NPCs do NOT advance the act; only the director can.
+ */
+function buildNpcActBlock(
+  storyBible: StoryBible | null,
+  storyState: StoryState | null,
+): string {
+  if (!storyBible || !storyState) {
+    return `Story guardrail: (none — play the room as you find it.)`;
+  }
+  const idx = Math.max(
+    0,
+    Math.min(storyState.currentActIndex, storyBible.acts.length - 1),
+  );
+  const act = storyBible.acts[idx];
+  if (!act) return `Story guardrail: (act index out of range.)`;
+  return [
+    `Story guardrail — the day has a shape: "${storyBible.logline}" (${storyBible.theme}).`,
+    `The room is currently inside ${act.name} (act ${idx + 1} of ${storyBible.acts.length}).`,
+    `What is true in this act: ${act.premise}`,
+    `What is pressing on everyone: ${act.pressure}`,
+    `Let your decisions serve that pressure. You can still be quiet or ordinary — but when you act, act inside this act, not some other one.`,
   ].join("\n");
 }
 
@@ -112,7 +148,7 @@ const MAX_CADENCE_SEC = 1800;
 const DEFAULT_CADENCE_SEC = 60;
 // Kimi is a reasoning model — it streams `thinking_delta` before producing
 // any `text_delta`. Budget must cover thinking + the final JSON response.
-const MAX_TOKENS = 2000;
+const MAX_TOKENS = 8000;
 const RECENT_EVENTS_WINDOW = 12;
 
 interface NpcData extends Record<string, unknown> {
@@ -125,7 +161,7 @@ interface NpcData extends Record<string, unknown> {
 
 const npcImpl: SceneAgentImpl = {
   kind: NPC_KIND,
-  async think({ now, agent, env, emit, recentEvents, dailyPlan, clock, anchors, roomPrompt, difficulty }) {
+  async think({ now, agent, env, emit, recentEvents, dailyPlan, clock, anchors, roomPrompt, difficulty, storyBible, storyState }) {
     const data = agent.data as NpcData | undefined;
     if (!data || !dailyPlan || !clock) {
       return {
@@ -136,7 +172,13 @@ const npcImpl: SceneAgentImpl = {
     }
     const npc = dailyPlan.npcs.find((n) => n.name === data.name);
     const slot = npc ? slotForHour(npc, clock.gameHour) : null;
-    const systemPrompt = buildNpcSystem(anchors, roomPrompt, difficulty);
+    const systemPrompt = buildNpcSystem(
+      anchors,
+      roomPrompt,
+      difficulty,
+      storyBible,
+      storyState,
+    );
     const userPrompt = buildUserPrompt({
       name: data.name,
       backstory: data.backstory,
@@ -157,7 +199,7 @@ const npcImpl: SceneAgentImpl = {
       systemPrompt,
       userPrompt,
       sessionId: agent.id,
-      onDelta: (delta) => {
+      onReason: (delta) => {
         tokenCount++;
         emit({ type: "agent-thinking", delta });
       },
@@ -181,7 +223,7 @@ interface StreamThinkingOpts {
   systemPrompt: string;
   userPrompt: string;
   sessionId: string;
-  onDelta: (delta: string) => void;
+  onReason?: (delta: string) => void;
 }
 
 async function streamThinking(opts: StreamThinkingOpts): Promise<string> {
@@ -216,7 +258,10 @@ async function streamThinking(opts: StreamThinkingOpts): Promise<string> {
         const delta = (ev as { delta?: string }).delta ?? "";
         if (!delta) continue;
         buffer += delta;
-        opts.onDelta(delta);
+      } else if (t === "thinking_delta") {
+        const delta = (ev as { delta?: string }).delta ?? "";
+        if (!delta) continue;
+        opts.onReason?.(delta);
       } else if (t === "error") {
         console.error(
           `[pi-ai stream error] sessionId=${opts.sessionId}`,
@@ -271,7 +316,7 @@ function buildUserPrompt(opts: {
     `Today's objective: ${opts.objective}`,
     `Private motive: ${opts.motive}`,
     `Current in-game hour: ${opts.gameHour}:00`,
-    `Scheduled activity now: ${opts.currentActivity}${moodLine}`,
+    `You ARE doing this right now: ${opts.currentActivity}${moodLine}. Your next action (say/do/move) should read like a person in the middle of that activity unless a recent moment below gives you a concrete reason to pivot.`,
     `Today's seed: ${opts.seed}`,
     `Named positions you may stand at: ${anchorList}.`,
     "",

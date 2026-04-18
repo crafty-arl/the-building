@@ -56,10 +56,9 @@ export function sceneToWire(scene: Scene): SceneWire {
     npcs: scene.npcs,
     anchors: scene.anchors,
   };
-  if (scene.tilemap) wire.tilemap = scene.tilemap;
-  if (typeof scene.floorY === "number") wire.floorY = scene.floorY;
-  if (scene.anchorCoords) wire.anchorCoords = scene.anchorCoords;
-  if (scene.palette) wire.palette = scene.palette;
+  if (scene.tilesetRef) wire.tilesetRef = scene.tilesetRef;
+  if (scene.rooms) wire.rooms = scene.rooms;
+  if (scene.portals) wire.portals = scene.portals;
   if (scene.source) wire.source = scene.source;
   return wire;
 }

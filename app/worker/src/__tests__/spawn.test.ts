@@ -168,6 +168,8 @@ describe("dispatchDueAgents — spawn handling", () => {
       anchors: ANCHORS,
       roomPrompt: "test",
       difficulty: "resident",
+      storyBible: null,
+      storyState: null,
       onSpawn,
     });
 
@@ -227,6 +229,8 @@ describe("dispatchDueAgents — spawn handling", () => {
       anchors: ANCHORS,
       roomPrompt: "test",
       difficulty: "resident",
+      storyBible: null,
+      storyState: null,
       onSpawn: async () => null,
     });
     expect(broadcasts.find((m) => m.type === "npc-spawned")).toBeUndefined();
@@ -266,6 +270,8 @@ describe("dispatchDueAgents — spawn handling", () => {
       anchors: ANCHORS,
       roomPrompt: "test",
       difficulty: "resident",
+      storyBible: null,
+      storyState: null,
       onSpawn,
     });
     expect(onSpawn).not.toHaveBeenCalled();
